@@ -520,7 +520,14 @@ class ConfigsPage extends ServerFormPage
     }
 
     /**
-     * getDefaultHeaderActions, not getHeaderActions — see ModsPage.
+     * getDefaultHeaderActions here, and getHeaderActions on the pages that
+     * extend Filament's `Page` — the difference is the base class, not a style.
+     *
+     * This one extends `ServerFormPage`, which carries the panel's
+     * `CanCustomizeHeaderActions`. Its `getHeaderActions()` merges actions other
+     * plugins registered through `registerCustomHeaderActions()` around this
+     * method, so overriding `getHeaderActions()` here would compile and silently
+     * discard every one of them. `ModsPage` documents the opposite trap.
      *
      * @return array<int, Action>
      */
