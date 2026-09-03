@@ -344,19 +344,34 @@ class ConfigsPage extends ServerFormPage
                 ->helperText('Leave blank to keep the current value.');
         }
 
+        $help = $spec['helper'] ?? null;
+
         if ($locked) {
             // Shown, not hidden: a greyed field with a reason is far less
-            // confusing than a setting that has silently disappeared.
+            // confusing than a setting that has silently disappeared. The lock
+            // takes the hint icon, so the explanation of what the setting *does*
+            // moves to the helper line — a locked field still needs explaining,
+            // and losing it was the old behaviour.
             $field = $field
                 ->disabled()
-                ->hintIcon('tabler-lock')
-                ->helperText($this->lockReason($key, $spec));
-        } elseif (! $canEdit) {
+                ->hintIcon('tabler-lock', tooltip: $this->lockReason($key, $spec));
+
+            if (filled($help)) {
+                $field = $field->helperText($help);
+            }
+
+            return $field;
+        }
+
+        if (! $canEdit) {
             $field = $field->disabled();
         }
 
-        if (! empty($spec['helper']) && ! $locked) {
-            $field = $field->helperText($spec['helper']);
+        // A tooltip rather than a helper line under every field. There are
+        // forty-nine settings on server.cfg alone, and a paragraph beneath each
+        // one turns a form somebody scans into a wall of prose they do not.
+        if (filled($help)) {
+            $field = $field->hintIcon('tabler-help-circle', tooltip: $help);
         }
 
         return $field;
@@ -489,13 +504,43 @@ class ConfigsPage extends ServerFormPage
         }
     }
 
+    /**
+     * Show a different config file.
+     *
+     * ## Why the schema is dropped rather than just refilled
+     *
+     * This took two clicks to update, and the reason is that the form's
+     * *structure* depends on which file is open — server.cfg and basic.cfg have
+     * entirely different fields, and the "Other settings" passthrough is built
+     * from whatever keys that file happens to carry.
+     *
+     * Filament resolves a schema once per request and keeps it in
+     * `$cachedSchemas`. By the time this action runs, Livewire has already
+     * hydrated the component and that resolution has usually happened — against
+     * the *previous* file. Setting `$this->file` and calling `fillForm()` then
+     * pours the new file's values into the old file's fields: values that share
+     * a key survive, everything else is silently dropped, and the page only
+     * looks right on the next click, when the component rehydrates with the new
+     * value already set.
+     *
+     * `cacheSchema('form', null)` — with the second argument explicitly passed,
+     * which is what the framework checks with `func_num_args()` — unsets the
+     * cached schema so the next access rebuilds it. `fillForm()` reads the file
+     * and sets `$fileMissing` and `$unknown` *before* it touches `$this->form`,
+     * so the rebuild sees the state it needs.
+     */
     public function switchFile(string $file): void
     {
-        if (in_array($file, $this->profile()->configFiles(), true)) {
-            $this->file = $file;
-            $this->configMemo = null;
-            $this->fillForm();
+        if (! in_array($file, $this->profile()->configFiles(), true)) {
+            return;
         }
+
+        $this->file = $file;
+        $this->configMemo = null;
+
+        $this->cacheSchema('form', null);
+
+        $this->fillForm();
     }
 
     /**
