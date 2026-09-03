@@ -156,7 +156,7 @@ class WorkshopPage extends Page implements HasTable
                         'size' => $item->sizeForHumans(),
                         'requires' => count($item->children),
                         'installable' => $item->isInstallable(),
-                        'in_order' => $order->has('@' . $item->title),
+                        'in_order' => $order->has($item->id),
                         'url' => WorkshopId::url($item->id),
                     ];
                 }
@@ -305,15 +305,14 @@ class WorkshopPage extends Page implements HasTable
                     continue;
                 }
 
-                // The folder name is derived from the title because that is all
-                // the API offers, and it is the convention every Arma mod
-                // follows. It is a guess, and the Mods page shows plainly
-                // whether the folder turned up on disk — which is the check
-                // that catches a wrong guess.
-                $folder = '@' . preg_replace('/[^A-Za-z0-9_\-]+/', '_', trim($item->title));
-
-                if (! $order->has($folder)) {
-                    $order->add($folder);
+                // The **id**, never a name. The list this writes is read by the
+                // egg's install script, and the only value SteamCMD can act on
+                // is an id. An earlier version wrote a folder name guessed from
+                // the Steam title, which downloaded nothing at all: the script
+                // cannot fetch a name, and the guess did not match the folder
+                // the publisher actually shipped.
+                if (! $order->has($item->id)) {
+                    $order->add($item->id);
                     $added++;
                 }
             }

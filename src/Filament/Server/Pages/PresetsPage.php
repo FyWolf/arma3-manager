@@ -28,6 +28,7 @@ use FyWolf\Arma3Manager\Support\InvalidPresetException;
 use FyWolf\Arma3Manager\Support\LauncherPreset;
 use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
+use FyWolf\Arma3Manager\Support\WorkshopId;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
@@ -128,6 +129,7 @@ class PresetsPage extends Page implements HasTable
         return $table
             ->records(function (): array {
                 $order = app(ModService::class)->loadOrder($this->server(), $this->profile());
+                $titles = app(SteamWorkshopClient::class)->items($order->all());
 
                 $records = [];
                 $position = 1;
@@ -136,7 +138,10 @@ class PresetsPage extends Page implements HasTable
                     $records[$entry] = [
                         'entry' => $entry,
                         'position' => $position++,
-                        'folder' => ModList::folder($entry),
+                        // The title when Steam knows it, the id otherwise. The
+                        // load order is ids, and a column of bare numbers is not
+                        // something anyone can check against their launcher.
+                        'name' => $titles[$entry]->title ?? $entry,
                     ];
                 }
 
@@ -144,7 +149,10 @@ class PresetsPage extends Page implements HasTable
             })
             ->columns([
                 TextColumn::make('position')->label('#')->width('4rem'),
-                TextColumn::make('folder')->label('Mod')->weight('bold'),
+                TextColumn::make('name')
+                    ->label('Mod')
+                    ->weight('bold')
+                    ->description(fn (array $record): string => 'Workshop id ' . $record['entry']),
             ])
             ->paginated(false)
             ->emptyStateHeading('Nothing in the load order yet')
@@ -299,14 +307,16 @@ class PresetsPage extends Page implements HasTable
 
                 if ($item === null) {
                     // Steam did not return it: deleted, private, or the id was
-                    // wrong. Counted and reported rather than added as a folder
-                    // that will never exist.
+                    // wrong. Counted and reported rather than added as something
+                    // that can never be fetched.
                     $unknown++;
 
                     continue;
                 }
 
-                $order->add('@' . preg_replace('/[^A-Za-z0-9_\-]+/', '_', trim($item->title)));
+                // The id itself. See WorkshopPage for why a name is useless
+                // here — the install script downloads by id or not at all.
+                $order->add($item->id);
             }
 
             $mods->saveLoadOrder($server, $profile, $order);
@@ -378,36 +388,26 @@ class PresetsPage extends Page implements HasTable
     {
         $order = app(ModService::class)->loadOrder($this->server(), $this->profile());
 
-        // The export carries ids where they are known and names otherwise. A
-        // load order built by hand or by SFTP has folders with no workshop id
-        // behind them, and LauncherPreset::render drops those rather than
-        // writing a row the launcher would reject.
-        $client = app(SteamWorkshopClient::class);
+        // Straightforward now that the load order *is* ids. This used to guess
+        // a name from the folder and then search Steam to find the id back
+        // again — a round trip that needed an API key, produced fewer rows than
+        // the server actually runs, and could match the wrong mod outright.
+        $ids = array_values(array_filter($order->all(), WorkshopId::isValid(...)));
+        $items = app(SteamWorkshopClient::class)->items($ids);
+
         $mods = [];
 
-        foreach ($order->all() as $entry) {
-            $folder = ltrim(ModList::folder($entry), '@');
-
-            $mods[] = ['id' => '', 'name' => $folder];
+        foreach ($ids as $id) {
+            $mods[] = [
+                'id' => $id,
+                // The title if Steam knows it, the id otherwise. A preset row
+                // needs a label, and an id is a worse one than a name but an
+                // honest one — better than dropping the mod from the export.
+                'name' => $items[$id]->title ?? $id,
+            ];
         }
 
-        // Resolve names back to ids where the search endpoint can do it. Best
-        // effort: without an API key this yields nothing and the export still
-        // renders, just with fewer rows.
-        if ($client->canSearch()) {
-            foreach ($mods as $index => $mod) {
-                $hits = $client->search($mod['name'], perPage: 1);
-
-                if ($hits !== []) {
-                    $mods[$index]['id'] = $hits[0]->id;
-                }
-            }
-        }
-
-        $html = LauncherPreset::render($name, array_values(array_filter(
-            $mods,
-            static fn (array $mod): bool => $mod['id'] !== '',
-        )));
+        $html = LauncherPreset::render($name, $mods);
 
         Activity::event('server:arma3.preset-export')->property(['preset' => $name])->log();
 

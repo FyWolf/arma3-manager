@@ -73,14 +73,16 @@ class ModSet extends Model
     }
 
     /**
-     * The folder names this set contributes to `-mod=`, in order.
+     * The Workshop ids this set contributes, in order.
+     *
+     * Ids rather than folder names, because the load order this feeds is what
+     * the egg's install script downloads from and SteamCMD only takes an id.
+     * The `folder` recorded against each entry is informational — it is what
+     * the mod is expected to unpack as, and nothing here relies on it.
      */
     public function modList(): ModList
     {
-        return ModList::fromArray(array_values(array_filter(array_map(
-            static fn ($mod) => is_array($mod) ? (string) ($mod['folder'] ?? '') : '',
-            $this->mods ?? [],
-        ))));
+        return ModList::fromArray($this->workshopIds());
     }
 
     /**

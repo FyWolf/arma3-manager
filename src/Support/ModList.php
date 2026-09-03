@@ -238,6 +238,21 @@ class ModList
         return $this->entries === [] ? '' : implode(';', $this->entries) . ';';
     }
 
+    /**
+     * The same list with **no trailing separator**, for a variable an install
+     * script will split.
+     *
+     * `render()` keeps the trailing `;` because that is what Arma's own launcher
+     * writes into `-mod=`. A download list is different: an egg that does
+     * `IFS=';' read -ra ids` on a value ending in `;` gets an empty final
+     * element and hands SteamCMD an empty id, which fails the whole install for
+     * a character nobody typed.
+     */
+    public function renderPlain(): string
+    {
+        return implode(';', $this->entries);
+    }
+
     public function renderFlag(string $flag = 'mod'): string
     {
         return $this->entries === [] ? '' : '-' . $flag . '=' . $this->render();
