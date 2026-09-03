@@ -150,9 +150,14 @@ class PresetsPage extends Page implements HasTable
     }
 
     /**
+     * getHeaderActions, not getDefaultHeaderActions — see the note on
+     * `ModsPage`. This page extends Filament's `Page`, which has no
+     * `getDefaultHeaderActions()`, so the wrong name is never called and the
+     * header renders empty.
+     *
      * @return array<int, Action>
      */
-    protected function getDefaultHeaderActions(): array
+    protected function getHeaderActions(): array
     {
         return [
             Action::make('import')

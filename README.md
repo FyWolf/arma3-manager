@@ -20,6 +20,7 @@ Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind 
 | Feature | State |
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
+| Egg coverage screen — what every egg resolves to, and why | built |
 | Mods — load order, position, add/remove, on-disk reconciliation | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
@@ -56,7 +57,7 @@ client for a missing addon, naming a class rather than a mod.
 
 ## Developing
 
-Six checks, four of which need no panel at all:
+Seven checks, five of which need no panel at all:
 
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
@@ -64,6 +65,7 @@ php tests/ModListTest.php                         # 60 load-order assertions
 php tests/LauncherPresetTest.php                  # 51 preset/id assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
+php tests/PageHooksTest.php                       # header-action method names
 php tests/verify-imports.php   /path/to/panel     # every `use` resolves
 php tests/verify-overrides.php /path/to/panel     # no narrowed inherited methods
 ```
@@ -73,6 +75,13 @@ php tests/verify-overrides.php /path/to/panel     # no narrowed inherited method
 
 - A **mistyped namespace** fails silently. `PluginService` catches the exception, flips the
   plugin to Errored and moves on, so the symptom is a plugin that simply does not appear.
+- **Overriding the wrong header-action method** renders a page with no buttons. Filament's own
+  `Page` calls `getHeaderActions()`; the panel's `ServerFormPage` carries
+  `CanCustomizeHeaderActions` and calls `getDefaultHeaderActions()` instead, merging other
+  plugins' actions around it. Use the wrong name for your base class and the method is simply
+  never called — no error, no warning, an empty header. Four pages shipped this way, including
+  the Mods page's primary "Write mod list" button. `PageHooksTest.php` fails the build on it and
+  needs no panel, since the base class name is in the file.
 - **Narrowing an inherited method's visibility** — `protected function getFormActions()` over
   a trait's `public` one — is a fatal at *class-load* time. In a panel that is boot, so it
   does not break one page: it takes the entire panel down, and the error page itself fails to
@@ -144,6 +153,17 @@ Detection order is load-bearing: `headless` is matched **before** the generic Ar
 because a headless-client egg is also an Arma egg, and matching the generic token first hands
 it a Missions page for a container that will never host a mission.
 
+**Three of those four outcomes used to be invisible.** The profile screen lists the eggs
+*explicitly* mapped to each profile, so an egg working through inheritance looked unmapped, an
+egg working through detection looked unmapped, and an egg resolving to nothing was
+indistinguishable from one resolving fine — the pages were simply absent and nothing said why.
+
+**Admin → Arma 3 Eggs** is the answer: one row per egg, showing what it resolves to, how it got
+there, which pages that grants, and how many servers are on it. It also distinguishes the two
+kinds of "no pages" — an Arma egg that matched nothing (a gap worth fixing) from a Rust egg that
+matched nothing (correct, and hidden by default). Detected guesses can be pinned from there,
+which writes the guess down so a later change to the detection rules cannot move it silently.
+
 ## Why the egg variable names are a list
 
 The profile carries `mod_list_variables` as an *ordered list of candidates* rather than one
@@ -169,8 +189,11 @@ refuses rather than creating a missing variable, and names the one it was lookin
    imported from the `pelican-eggs` organisation *after* the panel is set up, so eggs added
    later are not mapped by the install-time seeder. Admin → Arma 3 Profiles has the same thing
    as a button.
-4. Review the mapping at **Admin → Arma 3 Profiles**, and check the variable names on the
-   profile match what your egg actually declares.
+4. Review coverage at **Admin → Arma 3 Eggs**. That screen is the one that answers "which of my
+   eggs get the pages, and why" — including the eggs that get nothing. Pin anything it lists as
+   *Detected* if you want the decision written down rather than re-guessed.
+5. Check the variable names on the profile at **Admin → Arma 3 Profiles** match what your egg
+   actually declares.
 
 ### Optional: a Steam Web API key
 

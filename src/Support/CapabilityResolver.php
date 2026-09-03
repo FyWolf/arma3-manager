@@ -51,6 +51,24 @@ class CapabilityResolver
         return $this->memo[$eggId] = $this->resolve($server);
     }
 
+    /**
+     * The same question asked about an egg, with no server in hand.
+     *
+     * This is what the Egg coverage screen is built on, and it deliberately
+     * shares `resolveFor()` with the server path rather than repeating the
+     * resolution order. Two copies of "explicit, then inherited, then detected,
+     * then nothing" is precisely the drift that would make the admin screen
+     * confidently describe pages a server does not get.
+     *
+     * The one thing it cannot see is the server's own variables, so an egg
+     * whose Arma app id was only ever filled in per-server reads as unmatched
+     * here. That is the honest answer for an egg: the value is not on it.
+     */
+    public function forEgg(Egg $egg): ?ResolvedProfile
+    {
+        return $this->resolveFor($egg, null);
+    }
+
     private function resolve(Server $server): ?ResolvedProfile
     {
         $server->loadMissing('egg');
@@ -61,6 +79,11 @@ class CapabilityResolver
             return null;
         }
 
+        return $this->resolveFor($egg, $server);
+    }
+
+    private function resolveFor(Egg $egg, ?Server $server): ?ResolvedProfile
+    {
         // 1. Explicit mapping. The admin always wins.
         if ($profile = $this->profileFor($egg)) {
             return ResolvedProfile::fromModel($profile, ResolvedProfile::SOURCE_EXPLICIT);
@@ -108,6 +131,18 @@ class CapabilityResolver
     /**
      * Is this an Arma 3 egg at all?
      *
+     * Public because the Egg coverage screen has to tell two kinds of "no pages"
+     * apart: an Arma egg that resolves to nothing, which is a gap worth fixing,
+     * and a Rust egg that resolves to nothing, which is correct and is noise.
+     * Without the distinction the screen either hides the gap or drowns it in
+     * every other egg on the node.
+     */
+    public function isArmaEgg(Egg $egg): bool
+    {
+        return $this->looksLikeArma($egg);
+    }
+
+    /**
      * A tag, the egg's own name, or the Arma 3 app id in a variable. The app id
      * is checked last but is the strongest of the three, and is the only one
      * that survives an egg being renamed by whoever imported it.

@@ -210,16 +210,24 @@ class ModsPage extends Page implements HasTable
     }
 
     /**
-     * getDefaultHeaderActions, not getHeaderActions.
+     * getHeaderActions, not getDefaultHeaderActions — and which one is correct
+     * depends entirely on the base class.
      *
-     * Page carries CanCustomizeHeaderActions, whose getHeaderActions() merges
-     * actions other plugins registered via registerCustomHeaderActions() around
-     * this method. Overriding getHeaderActions() directly compiles fine and
-     * silently discards every one of them.
+     * `getDefaultHeaderActions()` exists only on the panel's
+     * `CanCustomizeHeaderActions` trait, which `ServerFormPage` carries (see
+     * `ConfigsPage`). A page extending Filament's own `Page` gets
+     * `getHeaderActions()` from `InteractsWithHeaderActions` and has no
+     * `getDefaultHeaderActions()` at all — so defining one here compiles
+     * cleanly, is never called, and the page renders with no header buttons.
+     *
+     * That is the failure this comment exists to prevent, and it is invisible
+     * to `php -l`, to the import check and to a reviewer who has just read the
+     * ServerFormPage version. `tests/verify-page-hooks.php` fails the build on
+     * it.
      *
      * @return array<int, Action>
      */
-    protected function getDefaultHeaderActions(): array
+    protected function getHeaderActions(): array
     {
         return [
             Action::make('sync')
