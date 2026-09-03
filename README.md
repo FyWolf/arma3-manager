@@ -13,7 +13,7 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 263 passing
+`use` resolves against a real panel's autoloader, and the parsers have 272 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
@@ -62,7 +62,7 @@ Seven checks, five of which need no panel at all:
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 60 load-order assertions
-php tests/LauncherPresetTest.php                  # 75 preset/id/upload assertions
+php tests/LauncherPresetTest.php                  # 84 preset/id/upload assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
 php tests/PageHooksTest.php                       # header-action method names
@@ -157,6 +157,19 @@ to do instead.
 Refused: empty files, anything over 2 MB, binary content, invalid UTF-8, files that are not
 preset-shaped, presets listing no Workshop mods, and presets over 500 mods (each one is a
 Steam metadata lookup under this panel's IP).
+
+**Two things about the real file format**, both learned by comparing against an actual export
+rather than by reasoning:
+
+- The marker is `arma:Type="list"`, **not** `"preset"`. Requiring `"preset"` refused every
+  genuine export. The presence of the meta is now the signal, whatever it says — and the
+  exporter here writes `list` too, so a preset produced by this plugin loads back into the
+  launcher.
+- A real export opens with a UTF-8 BOM followed by an XML prolog, so PHP's `finfo` reports it
+  as **`text/xml`**. Filament turns `acceptedFileTypes()` into a server-side `mimetypes:`
+  rule resolved by sniffing the bytes, so an html-only list rejects every real preset before
+  this plugin sees one — with a validation error rather than an explanation. That list has to
+  stay broad; the content check is what actually decides.
 
 ## Why the gating is a database table
 
