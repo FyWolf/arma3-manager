@@ -1,8 +1,10 @@
 <?php
 
+require __DIR__ . '/../src/Support/InvalidPresetException.php';
 require __DIR__ . '/../src/Support/WorkshopId.php';
 require __DIR__ . '/../src/Support/LauncherPreset.php';
 
+use FyWolf\Arma3Manager\Support\InvalidPresetException;
 use FyWolf\Arma3Manager\Support\LauncherPreset;
 use FyWolf\Arma3Manager\Support\WorkshopId;
 
@@ -58,6 +60,25 @@ check('an empty block yields nothing', WorkshopId::extractAll("  \n "), []);
 echo "\nWorkshopId helpers:\n";
 check('url() builds the page link', WorkshopId::url('450814997'), 'https://steamcommunity.com/sharedfiles/filedetails/?id=450814997');
 check('contentPath() is id-based, not title-based', WorkshopId::contentPath('450814997', 107410), 'steamapps/workshop/content/107410/450814997');
+
+/**
+ * Returns the refusal message, or null when the preset was accepted.
+ */
+function refusal(string $contents): ?string
+{
+    try {
+        LauncherPreset::fromFile($contents);
+
+        return null;
+    } catch (InvalidPresetException $exception) {
+        return $exception->getMessage();
+    }
+}
+
+function refused(string $contents): bool
+{
+    return refusal($contents) !== null;
+}
 
 // A cut-down but structurally faithful launcher export.
 $preset = <<<'HTML'
@@ -155,6 +176,84 @@ check('an escaped name survives the round trip', LauncherPreset::parse(
     LauncherPreset::render('Night & Day', [['id' => '450814997', 'name' => 'A']]),
 )->name, 'Night & Day');
 check('an escaped mod name survives the round trip', $again->mods()[1]['name'], 'ace & friends');
+
+echo "\nUpload validation — what is refused:\n";
+check('an empty file is refused', refused(''), true);
+check('a file of only whitespace is refused', refused("   \n  "), true);
+check('an oversized file is refused', refused(str_repeat('a', LauncherPreset::MAX_BYTES + 1)), true);
+check('the size message names the limit', str_contains((string) refusal(str_repeat('a', LauncherPreset::MAX_BYTES + 1)), '2 MB'), true);
+check('a binary file is refused', refused("<html>\0\x01binary</html>"), true);
+check('invalid UTF-8 is refused', refused("<div class=\"mod-list\"><table>\xC3\x28</table></div>"), true);
+check('an unrelated web page is refused', refused('<html><body><h1>Hello</h1></body></html>'), true);
+check('a preset-shaped file with no mods is refused', refused(
+    '<meta name="arma:Type" content="preset" /><div class="mod-list"><table></table></div>',
+), true);
+
+// The one that matters most: the size cap has to be checked BEFORE any pattern
+// runs, or the cap does not bound the work it exists to bound.
+$oversizedButValid = '<meta name="arma:Type" content="preset" />'
+    . '<div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>'
+    . str_repeat(' ', LauncherPreset::MAX_BYTES);
+check('size is checked before parsing, so a valid-but-huge file is still refused', refused($oversizedButValid), true);
+
+echo "\nUpload validation — what is accepted:\n";
+check('a genuine launcher export is accepted', refused($preset), false);
+check('and yields its mods', LauncherPreset::fromFile($preset)->ids(), ['450814997', '463939057']);
+check('and its name', LauncherPreset::fromFile($preset)->name, 'Unit Night & Ops');
+check('a file with the mod-list table but no arma:Type meta is accepted', refused(
+    '<div class="mod-list"><table><tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr></table></div>',
+), false);
+// The boundary, stated exactly rather than approximately: a file of precisely
+// MAX_BYTES is accepted and one byte more is not.
+$minimal = '<meta name="arma:Type" content="preset" /><div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>';
+$exact = $minimal . str_repeat(' ', LauncherPreset::MAX_BYTES - strlen($minimal));
+check('the boundary fixture really is exactly the limit', strlen($exact), LauncherPreset::MAX_BYTES);
+check('a file of exactly the limit is accepted', refused($exact), false);
+check('and still yields its mod', LauncherPreset::fromFile($exact)->ids(), ['450814997']);
+check('one byte over the limit is refused', refused($exact . ' '), true);
+
+echo "\nUpload validation — hostile input is data, never code:\n";
+// The file is never rendered anywhere, so a script tag has nowhere to run. What
+// is asserted here is the weaker but checkable property: nothing from the
+// markup escapes the parser except validated ids and a display name.
+$scripted = '<meta name="arma:Type" content="preset" />'
+    . '<script>alert(1)</script>'
+    . '<div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName"><script>alert(2)</script>Evil</td>'
+    . '<td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>';
+check('a script tag does not stop the parse', LauncherPreset::fromFile($scripted)->ids(), ['450814997']);
+check('script markup is stripped out of the display name', str_contains(LauncherPreset::fromFile($scripted)->mods()[0]['name'], '<script'), false);
+
+// XXE / billion laughs: presets claim to be XHTML, so reaching for an XML
+// parser is the natural mistake. Regex over a byte string cannot expand an
+// entity, and this pins that no entity is ever resolved.
+$xxe = '<?xml version="1.0"?>'
+    . '<!DOCTYPE preset [<!ENTITY xxe SYSTEM "file:///etc/passwd"><!ENTITY lol "lol">]>'
+    . '<meta name="arma:Type" content="preset" />'
+    . '<div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">&xxe;</td><td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>';
+$parsedXxe = LauncherPreset::fromFile($xxe);
+check('a DOCTYPE does not stop the parse', $parsedXxe->ids(), ['450814997']);
+check('an external entity is never expanded', str_contains($parsedXxe->mods()[0]['name'], 'root:'), false);
+check('the entity reference is left as inert text', $parsedXxe->mods()[0]['name'], '&xxe;');
+
+// An id is the only thing that reaches SteamCMD, so it must stay digits.
+$injected = '<meta name="arma:Type" content="preset" />'
+    . '<div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">X</td><td><a href="?id=../../etc/passwd"></a></td></tr>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">Y</td><td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>';
+check('a traversal in place of an id is dropped', LauncherPreset::fromFile($injected)->ids(), ['450814997']);
+check('every accepted id is digits only', array_filter(
+    LauncherPreset::fromFile($injected)->ids(),
+    fn (string $id): bool => preg_match('/^\d+$/', $id) !== 1,
+), []);
 
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "$pass passed, $fail failed\n";

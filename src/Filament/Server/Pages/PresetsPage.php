@@ -8,6 +8,7 @@ use App\Models\Server;
 use App\Traits\Filament\BlockAccessInConflict;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
+use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
@@ -23,6 +24,7 @@ use FyWolf\Arma3Manager\Enums\Capability;
 use FyWolf\Arma3Manager\Integrations\Workshop\SteamWorkshopClient;
 use FyWolf\Arma3Manager\Services\ModService;
 use FyWolf\Arma3Manager\Support\CapabilityResolver;
+use FyWolf\Arma3Manager\Support\InvalidPresetException;
 use FyWolf\Arma3Manager\Support\LauncherPreset;
 use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
@@ -166,12 +168,27 @@ class PresetsPage extends Page implements HasTable
                 ->color('primary')
                 ->visible(fn (): bool => $this->canEdit())
                 ->modalHeading('Import an Arma 3 Launcher preset')
-                ->modalDescription('Export one from the launcher with Mods → Preset → Export, open it in a text editor and paste the whole file here.')
+                ->modalDescription('Export one from the launcher with Mods → Preset → Export, then upload the .html file it writes.')
                 ->schema([
+                    FileUpload::make('file')
+                        ->label('Preset file')
+                        // The browser reports this and a browser can lie, so it
+                        // narrows the file picker and nothing more. Everything
+                        // that matters is checked against the bytes in
+                        // LauncherPreset::fromFile().
+                        ->acceptedFileTypes(['text/html', 'application/xhtml+xml', 'text/plain'])
+                        ->maxSize((int) ceil(LauncherPreset::MAX_BYTES / 1024))
+                        // Never written to the panel's disk. The file is read
+                        // once, scanned for workshop ids and dropped — there is
+                        // no reason to keep a customer's upload afterwards, and
+                        // anything kept is something that has to be secured.
+                        ->storeFiles(false)
+                        ->helperText('The .html file the Arma 3 Launcher writes. It is read once and never stored.'),
+
                     Textarea::make('html')
-                        ->label('Preset file contents')
-                        ->rows(10)
-                        ->required(),
+                        ->label('…or paste the file contents')
+                        ->rows(6)
+                        ->helperText('If uploading is awkward, open the file in a text editor and paste it here instead.'),
                     Toggle::make('replace')
                         ->label('Replace the current load order')
                         ->helperText('Off adds the preset\'s mods to what is already there. On makes the load order exactly the preset — which is what you want when matching a unit\'s modset, and destructive otherwise.')
@@ -209,19 +226,38 @@ class PresetsPage extends Page implements HasTable
             return;
         }
 
+        // One try around both the read and the parse: `uploadedContents()`
+        // throws the same exception for an oversized file, and leaving it
+        // outside would turn the one refusal that arrives before parsing into
+        // an unhandled 500.
         try {
-            $preset = LauncherPreset::parse((string) ($data['html'] ?? ''));
-            $ids = $preset->ids();
+            $contents = $this->uploadedContents($data['file'] ?? null) ?? (string) ($data['html'] ?? '');
 
-            if ($ids === []) {
+            if (trim($contents) === '') {
                 Notification::make()
-                    ->title('No mods found in that file')
-                    ->body('It does not look like a launcher preset. The file needs the <table> of ModContainer rows the launcher writes.')
+                    ->title('Nothing to import')
+                    ->body('Upload the .html file the launcher exported, or paste its contents.')
                     ->warning()
                     ->send();
 
                 return;
             }
+
+            // Every refusal reason is written for the customer, so it is shown
+            // as given rather than flattened into "invalid file".
+            $preset = LauncherPreset::fromFile($contents);
+        } catch (InvalidPresetException $exception) {
+            Notification::make()
+                ->title('That file was not imported')
+                ->body($exception->getMessage())
+                ->danger()
+                ->send();
+
+            return;
+        }
+
+        try {
+            $ids = $preset->ids();
 
             $client = app(SteamWorkshopClient::class);
             $mods = app(ModService::class);
@@ -282,6 +318,42 @@ class PresetsPage extends Page implements HasTable
             report($exception);
 
             Notification::make()->title('Could not import the preset')->body($exception->getMessage())->danger()->send();
+        }
+    }
+
+    /**
+     * The bytes of an uploaded preset, or null when nothing was uploaded.
+     *
+     * `->storeFiles(false)` leaves Livewire's `TemporaryUploadedFile` in the
+     * form state rather than a path, which is what keeps the upload off this
+     * panel's disk. The shape is awkward — Filament keys it by a generated uuid
+     * even for a single file — so both an array and a bare object are handled.
+     *
+     * The size is checked before the contents are read. `maxSize()` on the
+     * field already refuses an oversized upload, but that runs on a value the
+     * request supplies; this reads what is actually on disk, and it is the
+     * check standing between a large file and `file_get_contents` in memory.
+     *
+     * @param mixed $state
+     */
+    private function uploadedContents(mixed $state): ?string
+    {
+        $file = is_array($state) ? (reset($state) ?: null) : $state;
+
+        if (! is_object($file) || ! method_exists($file, 'get')) {
+            return null;
+        }
+
+        if (method_exists($file, 'getSize') && (int) $file->getSize() > LauncherPreset::MAX_BYTES) {
+            throw new InvalidPresetException('That file is larger than this page accepts.');
+        }
+
+        try {
+            return (string) $file->get();
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return null;
         }
     }
 

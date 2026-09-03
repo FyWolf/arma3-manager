@@ -13,7 +13,7 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 237 passing
+`use` resolves against a real panel's autoloader, and the parsers have 263 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
@@ -25,7 +25,7 @@ Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind 
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
-| Presets — Arma 3 Launcher HTML import and export | built |
+| Presets — Launcher HTML upload (validated) and export | built |
 | Parameters — startup flags, headless clients, Creator DLC | built |
 | Mod sets — curated catalogue, queued install, billing grants | built |
 
@@ -62,7 +62,7 @@ Seven checks, five of which need no panel at all:
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 60 load-order assertions
-php tests/LauncherPresetTest.php                  # 51 preset/id assertions
+php tests/LauncherPresetTest.php                  # 75 preset/id/upload assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
 php tests/PageHooksTest.php                       # header-action method names
@@ -125,6 +125,38 @@ Note the loop that isn't: the bot's own bump commit pushes to `main`, but pushes
 token is ever swapped for a PAT.
 
 ---
+
+## Uploading a launcher preset
+
+The Presets page takes the `.html` file the Arma 3 Launcher writes (*Mods → Preset →
+Export*), or its contents pasted in. Being clear about what protects that upload matters,
+because the obvious-looking check is the weakest one.
+
+**The real defences are structural:**
+
+- **The file is never rendered.** Not in a Blade view, not in a notification, not in an
+  iframe. It is pattern-matched and dropped, so a `<script>` in it has nowhere to run. This
+  is the property to preserve; it is not a check that can be added later.
+- **No XML parser touches it.** `DOMDocument`/`SimpleXML` bring entity expansion with them —
+  billion laughs, and XXE reading files off the panel. Presets *claim* to be XHTML, so
+  reaching for an XML parser is the natural mistake. Regex over a byte string cannot expand
+  an entity, and a test pins that `&xxe;` survives as inert text.
+- **Only `\d{4,20}` escapes the parser.** Workshop ids are validated as digits, and mod
+  folder names come from Steam's API response rather than from the file, so nothing
+  attacker-controlled reaches a path.
+- **The size cap runs before any pattern**, bounding the work every regex does. 2 MB, against
+  a real 400-mod preset of well under 200 KB.
+- **The upload is never stored.** `->storeFiles(false)` keeps it as a temporary file, read
+  once and dropped.
+
+**The `arma:Type` marker check is not a security control.** Anyone can put that meta tag in
+a file. It stops a customer uploading the wrong file and getting a confusing error, which is
+a different and equally worthwhile job — every refusal message says what was wrong and what
+to do instead.
+
+Refused: empty files, anything over 2 MB, binary content, invalid UTF-8, files that are not
+preset-shaped, presets listing no Workshop mods, and presets over 500 mods (each one is a
+Steam metadata lookup under this panel's IP).
 
 ## Why the gating is a database table
 
