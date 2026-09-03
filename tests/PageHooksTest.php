@@ -153,6 +153,41 @@ foreach ($uploads as $upload) {
     echo "       $upload\n";
 }
 
+// ---------------------------------------------------------------------------
+// Nothing may synthesise a mod folder name from a Steam title.
+// ---------------------------------------------------------------------------
+//
+// The load order is Workshop ids. It briefly held `'@' . preg_replace(...)` of
+// each mod's Steam title, which is wrong twice: the egg's install script cannot
+// download a name, so nothing was ever fetched; and the guess did not match the
+// folder anyway, because the real one comes from the mod's own mod.cpp. A title
+// like "[AFR] - Arma Factions Reimagined" sanitises to something no publisher
+// ever chose.
+//
+// The shape is distinctive enough to grep for, and it looked entirely
+// reasonable in review, so it is worth failing the build over.
+
+$guesses = [];
+
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(dirname(__DIR__) . '/src')) as $file) {
+    if ($file->getExtension() !== 'php') {
+        continue;
+    }
+
+    $source = file_get_contents($file->getPathname());
+
+    if (preg_match("/'@'\s*\.\s*preg_replace/", $source) === 1) {
+        $guesses[] = $file->getBasename('.php') . " builds a mod folder name with '@' . preg_replace(...). The load order holds Workshop ids; the folder is the install script's business.";
+    }
+}
+
+echo "\nMod folder names:\n";
+check('no page invents a folder name from a Steam title', $guesses, []);
+
+foreach ($guesses as $guess) {
+    echo "       $guess\n";
+}
+
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "Checked $checked page class(es).\n";
 echo "$pass passed, $fail failed\n";

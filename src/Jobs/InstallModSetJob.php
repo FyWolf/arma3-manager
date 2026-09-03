@@ -131,17 +131,14 @@ class InstallModSetJob implements ShouldQueue
                 return;
             }
 
-            // Folder names come from the set, not from the workshop titles: a
-            // title carries version numbers and spaces that the folder does
-            // not, and guessing wrong writes a load order pointing at nothing.
+            // Ids, in resolved order — dependencies first. The load order is
+            // what the egg's install script downloads from, and the only value
+            // SteamCMD can act on is an id; a folder name there downloads
+            // nothing, which is the fault this replaced.
             $order = $mods->loadOrder($server, $profile);
 
-            foreach ($set->mods ?? [] as $mod) {
-                $folder = is_array($mod) ? (string) ($mod['folder'] ?? '') : '';
-
-                if ($folder !== '') {
-                    $order->add($folder);
-                }
+            foreach ($resolved as $id) {
+                $order->add($id);
             }
 
             $mods->saveLoadOrder($server, $profile, $order);
@@ -152,10 +149,10 @@ class InstallModSetJob implements ShouldQueue
                 $serverOrder = $mods->serverLoadOrder($server, $profile);
 
                 foreach ($serverMods as $mod) {
-                    $folder = is_array($mod) ? (string) ($mod['folder'] ?? '') : '';
+                    $id = is_array($mod) ? WorkshopId::extract((string) ($mod['id'] ?? '')) : null;
 
-                    if ($folder !== '') {
-                        $serverOrder->add($folder);
+                    if ($id !== null) {
+                        $serverOrder->add($id);
                     }
                 }
 

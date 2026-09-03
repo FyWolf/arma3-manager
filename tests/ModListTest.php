@@ -105,6 +105,32 @@ check('a backslash path resolves too', ModList::folder('mods\\@ace'), '@ace');
 check('a trailing slash is ignored', ModList::folder('mods/@ace/'), '@ace');
 check('a deep path resolves to the leaf', ModList::folder('a/b/c/@ace'), '@ace');
 
+echo "\nWorkshop ids as entries:\n";
+// The load order holds Workshop ids, because that is the only value the egg's
+// install script can hand to SteamCMD. It held guessed @folder names once and
+// downloaded nothing at all.
+check('ids parse in order', ModList::parse('450814997;463939057')->all(), ['450814997', '463939057']);
+check('a duplicate id is dropped', ModList::parse('450814997;450814997')->all(), ['450814997']);
+check('ids keep their exact digits', ModList::parse('18446744073709551615')->all(), ['18446744073709551615']);
+check('a large id is not truncated to an int', ModList::parse('18446744073709551615')->all()[0], '18446744073709551615');
+check('has() finds an id', ModList::parse('450814997;463939057')->has('463939057'), true);
+check('remove() drops an id', ModList::parse('450814997;463939057')->remove('450814997')->all(), ['463939057']);
+check('order is preserved, because load order is meaning', ModList::parse('3;1;2')->all(), ['3', '1', '2']);
+
+echo "\nrenderPlain — the value written to the egg variable:\n";
+// A trailing separator is right for -mod= and wrong here: an install script
+// doing `IFS=';' read -ra ids` on a value ending in ';' gets an empty final
+// element and hands SteamCMD an empty id.
+check('no trailing separator', ModList::parse('450814997;463939057')->renderPlain(), '450814997;463939057');
+check('render() still keeps the trailing one for -mod=', ModList::parse('450814997;463939057')->render(), '450814997;463939057;');
+check('an empty list renders empty', ModList::parse('')->renderPlain(), '');
+check('a single id has no separator at all', ModList::parse('450814997')->renderPlain(), '450814997');
+check('renderPlain round-trips', ModList::parse(ModList::parse('1111;2222;3333')->renderPlain())->all(), ['1111', '2222', '3333']);
+check('splitting renderPlain on ; yields no empty element', array_filter(
+    explode(';', ModList::parse('450814997;463939057')->renderPlain()),
+    static fn (string $part): bool => $part === '',
+), []);
+
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "$pass passed, $fail failed\n";
 

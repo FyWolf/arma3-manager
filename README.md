@@ -13,7 +13,7 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 272 passing
+`use` resolves against a real panel's autoloader, and the parsers have 287 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
@@ -51,6 +51,29 @@ download it.** It goes into the load order; the customer reinstalls, and the egg
 script fetches what is now listed. A confirmation that said "Added" and stopped there would
 read as "the files are here", and they are not.
 
+### The load order is Workshop ids
+
+The mod-list variable holds **semicolon-separated Workshop ids** — `450814997;463939057` —
+with no trailing separator. That is the only value the install script can act on:
+`steamcmd +workshop_download_item 107410 <id>`.
+
+It briefly held `@Folder` names derived from each mod's Steam title. That is unusable twice
+over: the script cannot download a name, so nothing was ever fetched, and the guess was wrong
+anyway, because the real folder comes from the mod's own `mod.cpp` — a title like
+"[AFR] - Arma Factions Reimagined" sanitises to something no publisher chose. Building `-mod=`
+is therefore **not this plugin's job**; the install script does it after download, which is the
+only place the real folder names are known. `PageHooksTest.php` fails the build if anything
+starts synthesising a folder name again.
+
+Two things follow. Mod names on screen are resolved from the Steam API and cached, so the
+tables show "ACE3" rather than a column of numbers, degrading to the id if Steam is
+unreachable. And "is it downloaded?" is now exact rather than a name match: SteamCMD writes
+into `steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
+
+Creator DLC are deliberately **not** in that list. They are owned rather than downloaded and
+their short codes (`gm`, `vn`) are not ids, so the Parameters page records them in the
+manifest and tells you the `-mod=` fragment to add.
+
 The Mods page therefore leads with what is in the load order but *not* on disk. That gap is
 the failure with no readable symptom — Arma either refuses to start or starts and kicks every
 client for a missing addon, naming a class rather than a mod.
@@ -61,11 +84,11 @@ Seven checks, five of which need no panel at all:
 
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
-php tests/ModListTest.php                         # 60 load-order assertions
+php tests/ModListTest.php                         # 73 load-order assertions
 php tests/LauncherPresetTest.php                  # 84 preset/id/upload assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
-php tests/PageHooksTest.php                       # page conventions: header actions, uploads
+php tests/PageHooksTest.php                       # page conventions: headers, uploads, mod ids
 php tests/verify-imports.php   /path/to/panel     # every `use` resolves
 php tests/verify-overrides.php /path/to/panel     # no narrowed inherited methods
 ```

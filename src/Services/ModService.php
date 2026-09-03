@@ -8,26 +8,39 @@ use FyWolf\Arma3Manager\Support\DaemonDirs;
 use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
 use FyWolf\Arma3Manager\Support\ServerVariables;
+use FyWolf\Arma3Manager\Support\WorkshopId;
 use RuntimeException;
 use Throwable;
 
 /**
  * The load order, and the gap between it and what is on disk.
  *
- * ## Two sources of truth, and neither is authoritative alone
+ * ## The list is Workshop ids, not folder names
  *
- * The **load order** lives in a server variable, because that is what the
- * egg's startup command interpolates into `-mod=`. It is what the server will
- * try to load.
+ * This is the whole shape of the class and it was wrong once, so it is worth
+ * stating plainly.
  *
- * The **installed folders** live on disk, and are what SteamCMD has actually
- * fetched. They are what the server can load.
+ * The variable holds **semicolon-separated Workshop ids** — `450814997;463939057`
+ * — because the thing that reads it is the egg's install script, and the only
+ * value SteamCMD can act on is an id: `workshop_download_item 107410 <id>`.
  *
- * The interesting state is the difference. A mod in the load order and not on
- * disk is a server that will not start, or will start and kick every client for
- * a missing addon; a folder on disk and not in the load order is wasted disk and
- * nothing worse. So `missing()` is the number the Mods page leads with, and the
- * reason this class reads both rather than trusting either.
+ * An earlier version wrote `@Folder` names derived from each mod's Steam title
+ * with a regex. That is unusable twice over. The install script cannot download
+ * a name, so nothing was ever fetched; and the guess was wrong anyway, because
+ * the real folder comes from the mod's own `mod.cpp` and a title like
+ * "[AFR] - Arma Factions Reimagined" sanitises to something no publisher chose.
+ *
+ * The `-mod=` folder list is therefore **not** this plugin's job. It is built by
+ * the install script after download, which is the only place the real folder
+ * names are known.
+ *
+ * ## Which means "is it downloaded?" is now answerable
+ *
+ * SteamCMD puts an item in `steamapps/workshop/content/<app>/<id>`, a path
+ * derivable from the id alone. So `downloadedIds()` lists that directory and
+ * every entry it finds *is* an id — no guessing, no name matching. A mod in the
+ * load order with no such directory has not been fetched, and that is the number
+ * the Mods page leads with.
  *
  * ## Writing the manifest as well as the variable
  *
@@ -73,7 +86,7 @@ class ModService
             throw new RuntimeException(trans('arma3-manager::strings.variable_missing', ['names' => 'mod list']));
         }
 
-        if (! ServerVariables::write($server, $candidates, $mods->render())) {
+        if (! ServerVariables::write($server, $candidates, $mods->renderPlain())) {
             throw new RuntimeException(trans('arma3-manager::strings.variable_missing', [
                 'names' => implode(' / ', $candidates),
             ]));
@@ -103,7 +116,8 @@ class ModService
 
         $lines = [
             '# Written by Arma 3 Manager. Do not edit by hand — it is regenerated on every save.',
-            '# One entry per line, in load order.',
+            '# Steam Workshop ids, one per line, in load order.',
+            '# Fetch with: steamcmd +workshop_download_item ' . (int) config('arma3-manager.workshop.app_id', 107410) . ' <id>',
             '',
             '[mod]',
             ...$mods->all(),
@@ -148,13 +162,38 @@ class ModService
     }
 
     /**
-     * Entries in the load order with no matching folder on disk.
+     * Workshop ids SteamCMD has already fetched for this server.
+     *
+     * The directory names under `steamapps/workshop/content/<app>` *are* the
+     * ids, so this needs no name matching and cannot be wrong about which mod
+     * is which — unlike comparing a load order against `@folder` names, which
+     * only works if the folder happens to match the Steam title.
+     *
+     * @return array<int, string>
+     */
+    public function downloadedIds(Server $server, ResolvedProfile $profile): array
+    {
+        $appId = (int) config('arma3-manager.workshop.app_id', 107410);
+
+        return array_values(array_filter(
+            $this->listDirectories($server, 'steamapps/workshop/content/' . $appId),
+            WorkshopId::isValid(...),
+        ));
+    }
+
+    /**
+     * Entries in the load order that have not been downloaded.
      *
      * @return array<int, string>
      */
     public function missing(Server $server, ResolvedProfile $profile): array
     {
-        return $this->loadOrder($server, $profile)->missingFrom($this->installedFolders($server, $profile));
+        $downloaded = $this->downloadedIds($server, $profile);
+
+        return array_values(array_filter(
+            $this->loadOrder($server, $profile)->all(),
+            static fn (string $id): bool => ! in_array($id, $downloaded, true),
+        ));
     }
 
     /**
@@ -193,7 +232,7 @@ class ModService
     /**
      * @return array<int, string>
      */
-    private function listDirectories(Server $server, string $path): array
+    public function listDirectories(Server $server, string $path): array
     {
         try {
             $entries = $this->repository->setServer($server)->getDirectory(DaemonDirs::join($path));

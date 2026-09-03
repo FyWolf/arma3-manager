@@ -18,10 +18,12 @@ use Filament\Tables\Concerns\InteractsWithTable;
 use Filament\Tables\Contracts\HasTable;
 use Filament\Tables\Table;
 use FyWolf\Arma3Manager\Enums\Capability;
+use FyWolf\Arma3Manager\Integrations\Workshop\SteamWorkshopClient;
 use FyWolf\Arma3Manager\Services\ModService;
 use FyWolf\Arma3Manager\Support\CapabilityResolver;
 use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
+use FyWolf\Arma3Manager\Support\WorkshopId;
 use Throwable;
 
 /**
@@ -131,49 +133,68 @@ class ModsPage extends Page implements HasTable
                 $profile = $this->profile();
 
                 $order = $mods->loadOrder($server, $profile);
-                $installed = $mods->installedFolders($server, $profile);
                 $serverOrder = $mods->serverLoadOrder($server, $profile);
+
+                // What SteamCMD has actually fetched, read from the content
+                // directory it writes into. The directory names *are* the ids,
+                // so this is an exact answer rather than a name match.
+                $downloaded = $mods->downloadedIds($server, $profile);
+
+                // One batched lookup for every id on the page, so the table
+                // shows "ACE3" rather than a column of numbers. Cached, and a
+                // Steam outage degrades to showing the id — which is still the
+                // thing the customer can paste into a workshop URL.
+                $titles = app(SteamWorkshopClient::class)->items([
+                    ...$order->all(),
+                    ...$serverOrder->all(),
+                ]);
 
                 $records = [];
                 $position = 1;
 
-                foreach ($order->all() as $entry) {
-                    $records[$entry] = [
+                $build = function (string $entry, string $scope, int $position) use ($downloaded, $titles): array {
+                    $present = in_array($entry, $downloaded, true);
+
+                    return [
                         'entry' => $entry,
-                        'position' => $position++,
-                        'folder' => ModList::folder($entry),
-                        'scope' => 'Client + server',
-                        'present' => $installed->has($entry),
-                        'status' => $installed->has($entry) ? 'On disk' : 'Not downloaded',
-                        'status_color' => $installed->has($entry) ? 'success' : 'danger',
+                        'position' => $position,
+                        'name' => $titles[$entry]->title ?? $entry,
+                        'id' => $entry,
+                        'scope' => $scope,
+                        'present' => $present,
+                        'status' => $present ? 'Downloaded' : 'Not downloaded',
+                        'status_color' => $present ? 'success' : 'danger',
+                        'url' => WorkshopId::isValid($entry) ? WorkshopId::url($entry) : null,
                     ];
+                };
+
+                foreach ($order->all() as $entry) {
+                    $records[$entry] = $build($entry, 'Client + server', $position++);
                 }
 
                 foreach ($serverOrder->all() as $entry) {
                     // Keyed on a prefix so a mod that is in both lists — which
                     // is legal and occasionally deliberate — renders as two
                     // rows rather than one overwriting the other.
-                    $records['server:' . $entry] = [
-                        'entry' => $entry,
-                        'position' => $position++,
-                        'folder' => ModList::folder($entry),
-                        'scope' => 'Server only',
-                        'present' => $installed->has($entry),
-                        'status' => $installed->has($entry) ? 'On disk' : 'Not downloaded',
-                        'status_color' => $installed->has($entry) ? 'success' : 'danger',
-                    ];
+                    $records['server:' . $entry] = $build($entry, 'Server only', $position++);
                 }
 
                 return $records;
             })
             ->columns([
                 TextColumn::make('position')->label('#')->width('4rem'),
-                TextColumn::make('folder')->label('Mod')->weight('bold')->description(fn (array $record): string => $record['entry']),
+                TextColumn::make('name')
+                    ->label('Mod')
+                    ->weight('bold')
+                    ->description(fn (array $record): string => 'Workshop id ' . $record['id']),
                 TextColumn::make('scope')->label('Loaded by')->badge()->color('gray'),
                 TextColumn::make('status')
                     ->label('Files')
                     ->badge()
-                    ->color(fn (array $record): string => $record['status_color']),
+                    ->color(fn (array $record): string => $record['status_color'])
+                    ->tooltip(fn (array $record): string => $record['present']
+                        ? 'SteamCMD has fetched this into steamapps/workshop/content.'
+                        : 'Not on disk yet. Reinstall the server so SteamCMD fetches it.'),
             ])
             // Deliberately not sortable and not searchable: see the class note.
             // Order is meaning here, and a sort control is an invitation to
@@ -196,6 +217,14 @@ class ModsPage extends Page implements HasTable
                     ->visible(fn (): bool => $this->canEdit())
                     ->action(fn (array $record) => $this->move($record['entry'], 1)),
 
+                Action::make('view')
+                    ->label('View on Steam')
+                    ->icon('tabler-external-link')
+                    ->color('gray')
+                    ->iconButton()
+                    ->visible(fn (array $record): bool => $record['url'] !== null)
+                    ->url(fn (array $record): string => $record['url'], true),
+
                 Action::make('remove')
                     ->label('Remove')
                     ->icon('tabler-trash')
@@ -203,7 +232,7 @@ class ModsPage extends Page implements HasTable
                     ->iconButton()
                     ->visible(fn (): bool => $this->canEdit())
                     ->requiresConfirmation()
-                    ->modalHeading(fn (array $record): string => 'Remove ' . $record['folder'] . '?')
+                    ->modalHeading(fn (array $record): string => 'Remove ' . $record['name'] . '?')
                     ->modalDescription('Takes it out of the load order. The files stay on disk until you delete them from the file manager, so this is easy to undo.')
                     ->action(fn (array $record) => $this->remove($record['entry'])),
             ]);

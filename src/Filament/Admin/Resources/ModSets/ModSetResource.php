@@ -124,9 +124,8 @@ class ModSetResource extends Resource
 
                             TextInput::make('folder')
                                 ->label('Folder')
-                                ->required()
                                 ->placeholder('@CBA_A3')
-                                ->helperText('The @folder the server loads. This is what goes into -mod=, and it has to match what SteamCMD leaves on disk.'),
+                                ->helperText('Optional and informational. The load order is Workshop ids, and the real folder is whatever the mod\'s own mod.cpp declares after download — the egg\'s install script builds -mod= from that, not from this.'),
 
                             TextInput::make('name')->label('Label')->placeholder('Community Base Addons'),
                         ])
@@ -143,8 +142,8 @@ class ModSetResource extends Resource
                         ->reorderable()
                         ->addActionLabel('Add a server-only mod')
                         ->schema([
-                            TextInput::make('id')->label('Workshop id')->rule('regex:/^\d{4,20}$/'),
-                            TextInput::make('folder')->label('Folder')->required()->placeholder('@serverTool'),
+                            TextInput::make('id')->label('Workshop id')->required()->rule('regex:/^\d{4,20}$/'),
+                            TextInput::make('folder')->label('Folder')->placeholder('@serverTool'),
                             TextInput::make('name')->label('Label'),
                         ])
                         ->columns(3)

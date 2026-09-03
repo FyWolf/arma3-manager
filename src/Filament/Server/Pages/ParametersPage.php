@@ -17,7 +17,6 @@ use Filament\Schemas\Schema;
 use FyWolf\Arma3Manager\Enums\Capability;
 use FyWolf\Arma3Manager\Services\ModService;
 use FyWolf\Arma3Manager\Support\CapabilityResolver;
-use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
 use FyWolf\Arma3Manager\Support\ServerVariables;
 use FyWolf\Arma3Manager\Support\StartupParameters;
@@ -210,7 +209,7 @@ class ParametersPage extends ServerFormPage
         foreach ((array) config('arma3-manager.parameters.creator_dlc', []) as $code => $label) {
             $toggle = Toggle::make("dlc.$code")
                 ->label($label)
-                ->helperText('Adds `' . $code . '` to the load order. Only works if the Steam account on this server owns it — a CDLC cannot be downloaded from the Workshop.');
+                ->helperText('Recorded in the manifest as `' . $code . '`. It is deliberately not added to the mod list, which holds Workshop ids that SteamCMD downloads — a CDLC is owned, not downloaded, so an id list is the wrong place for it.');
 
             $dlc[] = $canEdit ? $toggle : $toggle->disabled();
         }
@@ -284,7 +283,11 @@ class ParametersPage extends ServerFormPage
                 ServerVariables::write($server, $this->headlessVariables(), (string) (int) $state['headless']);
             }
 
-            $this->applyCreatorDlc($state['dlc'] ?? []);
+            $dlc = $this->selectedCreatorDlc($state['dlc'] ?? []);
+
+            if ($this->profile()->has(Capability::Mods)) {
+                app(ModService::class)->writeManifest($server, $this->profile());
+            }
 
             Activity::event('server:arma3.parameters-edit')
                 ->property(['changed' => $rendered === '' ? 'cleared' : $rendered])
@@ -294,7 +297,14 @@ class ParametersPage extends ServerFormPage
 
             Notification::make()
                 ->title('Parameters saved')
-                ->body('Arma reads its command line only at startup, so restart the server to apply them.')
+                ->body(trim(
+                    'Arma reads its command line only at startup, so restart the server to apply them.'
+                    . ($dlc === []
+                        ? ''
+                        : ' Creator DLC are not downloadable, so they are not written into the mod list —'
+                          . ' add `-mod=' . implode(';', $dlc) . ';` to your startup parameters if your egg'
+                          . ' does not read the manifest.')
+                ))
                 ->success()
                 ->send();
         } catch (Throwable $exception) {
@@ -305,42 +315,36 @@ class ParametersPage extends ServerFormPage
     }
 
     /**
+     * The Creator DLC the customer has switched on.
+     *
+     * ## They are deliberately kept out of the mod list
+     *
+     * The mod list is **Workshop ids**, read by the egg's install script and
+     * fed to `workshop_download_item`. A CDLC is not a Workshop item: it is
+     * owned, ships with the game files, and has a short code (`gm`, `vn`) that
+     * is not an id at all. Writing one into that list — which an earlier version
+     * did — hands SteamCMD `gm` as though it were an id, and depending on the
+     * script that either logs a failure or takes the whole install down with it.
+     *
+     * So the selection is recorded in the manifest and nowhere else, and the
+     * page tells the customer the exact flag to add. That is less convenient
+     * than doing it for them, and it is the honest position until an egg is
+     * known to read the manifest: guessing that Arma merges a second `-mod=`
+     * parameter rather than replacing the first is exactly the kind of
+     * assumption that has already cost this plugin three releases.
+     *
      * @param array<string, mixed> $selection
+     *
+     * @return array<int, string>
      */
-    private function applyCreatorDlc(array $selection): void
+    private function selectedCreatorDlc(array $selection): array
     {
         $codes = array_keys((array) config('arma3-manager.parameters.creator_dlc', []));
 
-        if ($codes === [] || ! $this->profile()->has(Capability::Mods)) {
-            return;
-        }
-
-        $mods = app(ModService::class);
-        $server = $this->getRecord();
-        $profile = $this->profile();
-
-        $order = $mods->loadOrder($server, $profile);
-        $changed = false;
-
-        foreach ($codes as $code) {
-            $wanted = (bool) ($selection[$code] ?? false);
-            $present = $order->has($code);
-
-            if ($wanted && ! $present) {
-                // Appended rather than prepended: a CDLC provides content and
-                // is not depended on by anything, so it belongs after the mods
-                // that might patch it.
-                $order->add($code);
-                $changed = true;
-            } elseif (! $wanted && $present) {
-                $order->remove($code);
-                $changed = true;
-            }
-        }
-
-        if ($changed) {
-            $mods->saveLoadOrder($server, $profile, $order);
-        }
+        return array_values(array_filter(
+            $codes,
+            static fn (string $code): bool => (bool) ($selection[$code] ?? false),
+        ));
     }
 
     /**
@@ -364,13 +368,16 @@ class ParametersPage extends ServerFormPage
     }
 
     /**
-     * The load order as one line, so a customer can see what `-mod=` will
-     * actually be. Read-only: it is edited on the Mods page.
+     * The download list as one line, for display only.
+     *
+     * Deliberately not labelled `-mod=`: these are Workshop ids for the install
+     * script, and the `-mod=` folder list is built after download by the script
+     * itself, which is the only place the real folder names are known.
      */
     public function currentModLine(): string
     {
         $order = app(ModService::class)->loadOrder($this->getRecord(), $this->profile());
 
-        return $order->isEmpty() ? '(no mods)' : ModList::fromArray($order->all())->renderFlag();
+        return $order->isEmpty() ? '(no mods)' : $order->renderPlain();
     }
 }
