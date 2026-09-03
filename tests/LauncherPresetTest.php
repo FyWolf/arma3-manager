@@ -85,7 +85,7 @@ $preset = <<<'HTML'
 <?xml version="1.0" encoding="utf-8"?>
 <html>
  <head>
-  <meta name="arma:Type" content="preset" />
+  <meta name="arma:Type" content="list" />
   <meta name="arma:PresetName" content="Unit Night &amp; Ops" />
   <title>Arma 3 Preset</title>
  </head>
@@ -159,7 +159,8 @@ $rendered = LauncherPreset::render('My Preset', [
     ['id' => '450814997', 'name' => 'CBA_A3'],
     ['id' => '463939057', 'name' => 'ace & friends'],
 ]);
-check('the type meta is present', str_contains($rendered, 'name="arma:Type" content="preset"'), true);
+check('the exported type meta says list, as a real launcher export does', str_contains($rendered, 'name="arma:Type" content="list"'), true);
+check('and never the invented "preset" value', str_contains($rendered, 'content="preset"'), false);
 check('the preset name is written', str_contains($rendered, 'content="My Preset"'), true);
 check('a name is HTML-escaped on the way out', str_contains($rendered, 'ace &amp; friends'), true);
 check('rows carry the container type', substr_count($rendered, 'data-type="ModContainer"'), 2);
@@ -186,12 +187,12 @@ check('a binary file is refused', refused("<html>\0\x01binary</html>"), true);
 check('invalid UTF-8 is refused', refused("<div class=\"mod-list\"><table>\xC3\x28</table></div>"), true);
 check('an unrelated web page is refused', refused('<html><body><h1>Hello</h1></body></html>'), true);
 check('a preset-shaped file with no mods is refused', refused(
-    '<meta name="arma:Type" content="preset" /><div class="mod-list"><table></table></div>',
+    '<meta name="arma:Type" content="list" /><div class="mod-list"><table></table></div>',
 ), true);
 
 // The one that matters most: the size cap has to be checked BEFORE any pattern
 // runs, or the cap does not bound the work it exists to bound.
-$oversizedButValid = '<meta name="arma:Type" content="preset" />'
+$oversizedButValid = '<meta name="arma:Type" content="list" />'
     . '<div class="mod-list"><table>'
     . '<tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr>'
     . '</table></div>'
@@ -207,7 +208,7 @@ check('a file with the mod-list table but no arma:Type meta is accepted', refuse
 ), false);
 // The boundary, stated exactly rather than approximately: a file of precisely
 // MAX_BYTES is accepted and one byte more is not.
-$minimal = '<meta name="arma:Type" content="preset" /><div class="mod-list"><table>'
+$minimal = '<meta name="arma:Type" content="list" /><div class="mod-list"><table>'
     . '<tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr>'
     . '</table></div>';
 $exact = $minimal . str_repeat(' ', LauncherPreset::MAX_BYTES - strlen($minimal));
@@ -220,7 +221,7 @@ echo "\nUpload validation — hostile input is data, never code:\n";
 // The file is never rendered anywhere, so a script tag has nowhere to run. What
 // is asserted here is the weaker but checkable property: nothing from the
 // markup escapes the parser except validated ids and a display name.
-$scripted = '<meta name="arma:Type" content="preset" />'
+$scripted = '<meta name="arma:Type" content="list" />'
     . '<script>alert(1)</script>'
     . '<div class="mod-list"><table>'
     . '<tr data-type="ModContainer"><td data-type="DisplayName"><script>alert(2)</script>Evil</td>'
@@ -234,7 +235,7 @@ check('script markup is stripped out of the display name', str_contains(Launcher
 // entity, and this pins that no entity is ever resolved.
 $xxe = '<?xml version="1.0"?>'
     . '<!DOCTYPE preset [<!ENTITY xxe SYSTEM "file:///etc/passwd"><!ENTITY lol "lol">]>'
-    . '<meta name="arma:Type" content="preset" />'
+    . '<meta name="arma:Type" content="list" />'
     . '<div class="mod-list"><table>'
     . '<tr data-type="ModContainer"><td data-type="DisplayName">&xxe;</td><td><a href="?id=450814997"></a></td></tr>'
     . '</table></div>';
@@ -244,7 +245,7 @@ check('an external entity is never expanded', str_contains($parsedXxe->mods()[0]
 check('the entity reference is left as inert text', $parsedXxe->mods()[0]['name'], '&xxe;');
 
 // An id is the only thing that reaches SteamCMD, so it must stay digits.
-$injected = '<meta name="arma:Type" content="preset" />'
+$injected = '<meta name="arma:Type" content="list" />'
     . '<div class="mod-list"><table>'
     . '<tr data-type="ModContainer"><td data-type="DisplayName">X</td><td><a href="?id=../../etc/passwd"></a></td></tr>'
     . '<tr data-type="ModContainer"><td data-type="DisplayName">Y</td><td><a href="?id=450814997"></a></td></tr>'
@@ -254,6 +255,59 @@ check('every accepted id is digits only', array_filter(
     LauncherPreset::fromFile($injected)->ids(),
     fn (string $id): bool => preg_match('/^\d+$/', $id) !== 1,
 ), []);
+
+echo "\nThe shape a real launcher actually writes:\n";
+// Regression for a preset exported by the real Arma 3 Launcher, which differs
+// from what this parser originally assumed in two ways that both mattered:
+//
+//   - the marker is arma:Type="list", NOT "preset". Requiring "preset" refused
+//     every genuine export; only the mod-list fallback masked it.
+//   - the file opens with a UTF-8 BOM followed by an XML prolog, so PHP's finfo
+//     reports it as text/xml. That is what the upload field must accept.
+$real = "\xEF\xBB\xBF" . '<?xml version="1.0" encoding="utf-8"?>' . "\n"
+    . "<html>\n"
+    . "  <!--Created by Arma 3 Launcher: https://arma3.com-->\n"
+    . "  <head>\n"
+    . '    <meta name="arma:Type" content="list" />' . "\n"
+    . '    <meta name="generator" content="Arma 3 Launcher - https://arma3.com" />' . "\n"
+    . '    <meta name="arma:PresetName" content="ProC8V0F" />' . "\n"
+    . "  </head>\n"
+    . "  <body>\n"
+    . '    <div class="mod-list">' . "\n"
+    . "      <table>\n"
+    . '        <tr data-type="ModContainer">' . "\n"
+    . '          <td data-type="DisplayName">[AFR] - Arma Factions Reimagined</td>' . "\n"
+    . "          <td>\n"
+    . '            <span class="from-steam">Steam</span>' . "\n"
+    . "          </td>\n"
+    . "          <td>\n"
+    . '            <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3444112751" data-type="Link">https://steamcommunity.com/sharedfiles/filedetails/?id=3444112751</a>' . "\n"
+    . "          </td>\n"
+    . "        </tr>\n"
+    . "      </table>\n"
+    . "    </div>\n"
+    . "  </body>\n"
+    . "</html>\n";
+
+check('a real launcher export is accepted', refused($real), false);
+check('the BOM does not break the parse', LauncherPreset::fromFile($real)->ids(), ['3444112751']);
+check('the preset name is read past the BOM', LauncherPreset::fromFile($real)->name, 'ProC8V0F');
+check('a display name with brackets and dashes survives', LauncherPreset::fromFile($real)->mods()[0]['name'], '[AFR] - Arma Factions Reimagined');
+check('a BOM is still valid UTF-8, so it is not mistaken for binary', mb_check_encoding($real, 'UTF-8'), true);
+
+// The marker is now accepted whatever it says, because its value was the thing
+// that was wrong. Both the real value and the invented one must pass.
+check('arma:Type="list" is accepted', refused(
+    '<meta name="arma:Type" content="list" /><div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>',
+), false);
+check('arma:Type="preset" is still accepted', refused(
+    '<meta name="arma:Type" content="preset" /><div class="mod-list"><table>'
+    . '<tr data-type="ModContainer"><td data-type="DisplayName">A</td><td><a href="?id=450814997"></a></td></tr>'
+    . '</table></div>',
+), false);
+check('an unrelated page is still refused', refused('<html><body><h1>Hello</h1></body></html>'), true);
 
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "$pass passed, $fail failed\n";

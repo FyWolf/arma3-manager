@@ -164,15 +164,27 @@ class LauncherPreset
     /**
      * Whether this is plausibly a launcher export.
      *
-     * Either the meta the launcher stamps on every export, or the mod-list
-     * table it keys on when importing. Both are accepted because presets shared
-     * between units get hand-edited, and refusing a file the official launcher
-     * would happily read is a worse outcome than accepting a file that turns
-     * out to list nothing — which the caller rejects a moment later anyway.
+     * ## The marker value is `list`, not `preset`
+     *
+     * A real export from the Arma 3 Launcher carries:
+     *
+     *     <meta name="arma:Type" content="list" />
+     *
+     * An earlier version of this method required `content="preset"`, which is a
+     * value the launcher never writes — it was inferred from the feature's name
+     * rather than from a file. Only the `mod-list` fallback below stopped every
+     * genuine preset being refused, which is exactly the kind of near-miss that
+     * makes a second check worth having.
+     *
+     * So the content is no longer inspected at all: the *presence* of an
+     * `arma:Type` meta is the signal, whatever it says. That costs nothing,
+     * because this check has never been a security control — anyone can write
+     * that tag. It exists so somebody who picks the wrong file out of their
+     * downloads folder gets told so.
      */
     private static function looksLikePreset(string $html): bool
     {
-        if (preg_match('/<meta\s+name=(["\'])arma:Type\1\s+content=(["\'])preset\2/i', $html) === 1) {
+        if (preg_match('/<meta\s+name=(["\'])arma:Type\1/i', $html) === 1) {
             return true;
         }
 
@@ -319,9 +331,11 @@ class LauncherPreset
     /**
      * Render a preset the official launcher will import.
      *
-     * The structure is copied from a launcher export rather than invented: the
-     * launcher matches on `data-type` attributes and on the `arma:Type` meta,
-     * and a file missing either is rejected with no explanation.
+     * The structure is copied from a real launcher export rather than invented,
+     * including `arma:Type` being **`list`** — the launcher matches on that meta
+     * and on the `data-type` attributes, and a file carrying the wrong type may
+     * not import. This wrote `preset` until a real export was compared against
+     * it.
      *
      * @param array<int, array{id: string, name: string}> $mods
      */
@@ -361,7 +375,7 @@ class LauncherPreset
         <html>
          <!--Created by Arma 3 Manager on {$generated}-->
          <head>
-          <meta name="arma:Type" content="preset" />
+          <meta name="arma:Type" content="list" />
           <meta name="arma:PresetName" content="{$presetName}" />
           <meta name="generator" content="Arma 3 Manager" />
           <title>Arma 3 Preset {$presetName}</title>

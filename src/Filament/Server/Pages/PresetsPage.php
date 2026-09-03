@@ -172,11 +172,26 @@ class PresetsPage extends Page implements HasTable
                 ->schema([
                     FileUpload::make('file')
                         ->label('Preset file')
-                        // The browser reports this and a browser can lie, so it
-                        // narrows the file picker and nothing more. Everything
-                        // that matters is checked against the bytes in
-                        // LauncherPreset::fromFile().
-                        ->acceptedFileTypes(['text/html', 'application/xhtml+xml', 'text/plain'])
+                        // Deliberately broad, and it has to be. Filament turns
+                        // this into a server-side `mimetypes:` rule, which is
+                        // resolved by finfo *sniffing the bytes* rather than by
+                        // the extension — and a genuine launcher export begins
+                        // with a UTF-8 BOM followed by an XML prolog, so finfo
+                        // calls it **text/xml**. A list of html types
+                        // therefore rejects every real preset before this
+                        // plugin sees one byte of it, with a Filament
+                        // validation error rather than an explanation.
+                        //
+                        // It narrows the file picker and nothing more. What
+                        // actually decides whether a file is accepted is
+                        // LauncherPreset::fromFile(), which reads the bytes.
+                        ->acceptedFileTypes([
+                            'text/xml',
+                            'application/xml',
+                            'text/html',
+                            'application/xhtml+xml',
+                            'text/plain',
+                        ])
                         ->maxSize((int) ceil(LauncherPreset::MAX_BYTES / 1024))
                         // Never written to the panel's disk. The file is read
                         // once, scanned for workshop ids and dropped — there is
