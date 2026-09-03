@@ -60,6 +60,133 @@ class LauncherPreset
         return array_column($this->mods, 'id');
     }
 
+    /**
+     * The largest file this will look at, in bytes.
+     *
+     * Checked *before* any pattern runs, which is the point of it. Every
+     * extraction below uses lazy quantifiers over the whole document, and PCRE
+     * on a multi-megabyte input is where a "just paste your preset" feature
+     * turns into a way to occupy a web worker. A real launcher preset for a
+     * 400-mod modset is well under 200 KB.
+     */
+    public const MAX_BYTES = 2 * 1024 * 1024;
+
+    /**
+     * The most mods one preset may declare.
+     *
+     * Each one becomes a Workshop metadata lookup, batched 100 at a time, so an
+     * absurd preset is an absurd number of requests to Steam under this panel's
+     * IP. The largest published Arma collections are in the low hundreds.
+     */
+    public const MAX_MODS = 500;
+
+    /**
+     * Read a preset out of an uploaded file, refusing anything that is not one.
+     *
+     * ## What actually protects this, and what does not
+     *
+     * Being honest about the difference matters, because the obvious-looking
+     * check is the weakest one here.
+     *
+     * The **real** defences are structural:
+     *
+     * - **The file is never rendered.** Not in a Blade view, not in a
+     *   notification, not in an iframe. It is pattern-matched and thrown away,
+     *   so a `<script>` in it has nowhere to run. This is why the feature is
+     *   safe, and it is a property to preserve rather than a check to add.
+     * - **No XML parser touches it.** `DOMDocument`/`SimpleXML` would bring
+     *   entity expansion with them — billion laughs, and XXE reading files off
+     *   the panel. Presets *claim* to be XHTML, so reaching for an XML parser
+     *   is the natural mistake. Regex over a byte string cannot expand an
+     *   entity.
+     * - **Only `\d{4,20}` escapes the parser.** Workshop ids are validated as
+     *   digits before they are used, and folder names are derived from Steam's
+     *   response rather than from the file, so nothing attacker-controlled
+     *   reaches a path.
+     * - **The size cap runs first**, bounding the work every pattern does.
+     *
+     * The `arma:Type` marker check below is **not** a security control —
+     * anyone can put that meta tag in a file. It stops a customer uploading
+     * their bank statement and getting a confusing error, which is a different
+     * and equally worthwhile job.
+     *
+     * @throws InvalidPresetException with a message meant for the customer
+     */
+    public static function fromFile(string $contents): self
+    {
+        $length = strlen($contents);
+
+        if ($length === 0) {
+            throw new InvalidPresetException('That file is empty.');
+        }
+
+        // First, and before any pattern runs.
+        if ($length > self::MAX_BYTES) {
+            throw new InvalidPresetException(sprintf(
+                'That file is %s and the limit is %s. A launcher preset is normally well under 200 KB, so this is probably not one.',
+                self::bytesForHumans($length),
+                self::bytesForHumans(self::MAX_BYTES),
+            ));
+        }
+
+        // A NUL byte means this is not text at all — an archive or an image
+        // renamed to .html. Checked separately from the encoding test because
+        // it is the cheaper and more definite of the two.
+        if (str_contains($contents, "\0")) {
+            throw new InvalidPresetException('That is a binary file, not an HTML preset.');
+        }
+
+        if (! mb_check_encoding($contents, 'UTF-8')) {
+            throw new InvalidPresetException('That file is not valid UTF-8 text. Export the preset again from the Arma 3 Launcher rather than editing it by hand.');
+        }
+
+        if (! self::looksLikePreset($contents)) {
+            throw new InvalidPresetException('That does not look like an Arma 3 Launcher preset. Export one with Mods → Preset → Export and upload the .html file it writes.');
+        }
+
+        $preset = self::parse($contents);
+
+        if ($preset->mods === []) {
+            throw new InvalidPresetException('That preset lists no Steam Workshop mods. Local-only mods carry no Workshop link, so there is nothing here that could be downloaded.');
+        }
+
+        if (count($preset->mods) > self::MAX_MODS) {
+            throw new InvalidPresetException(sprintf(
+                'That preset lists %d mods and the limit is %d.',
+                count($preset->mods),
+                self::MAX_MODS,
+            ));
+        }
+
+        return $preset;
+    }
+
+    /**
+     * Whether this is plausibly a launcher export.
+     *
+     * Either the meta the launcher stamps on every export, or the mod-list
+     * table it keys on when importing. Both are accepted because presets shared
+     * between units get hand-edited, and refusing a file the official launcher
+     * would happily read is a worse outcome than accepting a file that turns
+     * out to list nothing — which the caller rejects a moment later anyway.
+     */
+    private static function looksLikePreset(string $html): bool
+    {
+        if (preg_match('/<meta\s+name=(["\'])arma:Type\1\s+content=(["\'])preset\2/i', $html) === 1) {
+            return true;
+        }
+
+        return preg_match('/class=(["\'])[^"\']*\bmod-list\b[^"\']*\1/i', $html) === 1;
+    }
+
+    private static function bytesForHumans(int $bytes): string
+    {
+        $units = ['B', 'KB', 'MB'];
+        $power = min((int) floor(log(max($bytes, 1), 1024)), count($units) - 1);
+
+        return round($bytes / (1024 ** $power), $power > 1 ? 1 : 0) . ' ' . $units[$power];
+    }
+
     public static function parse(string $html): self
     {
         return new self(
