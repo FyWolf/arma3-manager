@@ -1,0 +1,12 @@
+# Explicit entries only.
+#
+# Do NOT use a bare `.*` rule here. The billing plugin does, and it silently
+# ignores `.github/` too — `git add .github` then does nothing and the repo
+# ends up with no release workflow.
+/dev/
+/vendor/
+/node_modules/
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json

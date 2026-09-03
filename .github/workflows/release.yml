@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version (e.g. 1.2.0). Leave blank to derive it from commit messages.'
+        required: false
+        type: string
+
+# A release is a push, a tag and a GitHub release. Two of these running at once
+# would race on the version bump.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    # Pushes made with GITHUB_TOKEN do not themselves trigger workflows, so the
+    # bump commit cannot loop. The marker is belt-and-braces in case the token
+    # is ever swapped for a PAT, which would.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history — the bump level is derived from commits since the
+          # last tag.
+          fetch-depth: 0
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+
+      # Blocks the release rather than shipping a broken parser. server.cfg and
+      # basic.cfg are rewritten in place on a live server; a regression here
+      # silently corrupts a config file rather than failing loudly, and an Arma
+      # config that will not parse is a server that will not boot. The same is
+      # true of the mod list: mis-serialising `-mod=` loads the wrong mods in
+      # the wrong order, which surfaces as a signature mismatch kicking every
+      # player rather than as an error anybody can see here.
+      #
+      # Every test that needs no framework belongs here. Naming them one by one
+      # is how a test comes to be written and then not run — the glob picks up
+      # the next one automatically.
+      - name: Run tests
+        run: |
+          set -e
+          for test in tests/*Test.php; do
+            echo "== $test"
+            php "$test"
+          done
+
+      # Catches syntax errors the other checks cannot: these files are only ever
+      # loaded by a running panel, so a parse error ships silently.
+      - name: Lint
+        run: find src database tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+
+      - name: Work out the next version
+        id: version
+        run: |
+          set -euo pipefail
+
+          current=$(jq -r '.version' plugin.json)
+          echo "Current version: $current"
+
+          if [ -n "${{ inputs.version }}" ]; then
+            next="${{ inputs.version }}"
+            echo "Version given explicitly: $next"
+          else
+            last_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+
+            if [ -n "$last_tag" ]; then
+              echo "Commits since $last_tag:"
+              log=$(git log "${last_tag}..HEAD" --pretty=%B)
+            else
+              echo "No previous tag; considering all history."
+              log=$(git log --pretty=%B)
+            fi
+
+            # Conventional commits decide the bump:
+            #   feat!: / BREAKING CHANGE  → major
+            #   feat:                     → minor
+            #   anything else             → patch
+            if printf '%s' "$log" | grep -qE '(^|\n)BREAKING CHANGE|^[a-z]+(\(.+\))?!:'; then
+              bump=major
+            elif printf '%s' "$log" | grep -qE '^feat(\(.+\))?:'; then
+              bump=minor
+            else
+              bump=patch
+            fi
+
+            echo "Bump level: $bump"
+
+            IFS=. read -r major minor patch <<< "$current"
+            case "$bump" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+            esac
+
+            next="${major}.${minor}.${patch}"
+          fi
+
+          echo "Next version: $next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if the tag already exists
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.version.outputs.version }} already exists."
+            exit 1
+          fi
+
+      - name: Write version into plugin.json and updater.json
+        run: |
+          set -euo pipefail
+          v='${{ steps.version.outputs.version }}'
+          repo='${{ github.repository }}'
+          url="https://github.com/${repo}/releases/latest/download/arma3-manager.zip"
+          update_url="https://raw.githubusercontent.com/${repo}/refs/heads/main/updater.json"
+
+          # Both URLs are rewritten from the repository context rather than
+          # trusted from the file, so they stay correct whichever org this ends
+          # up under — and cannot silently point a customer's panel at someone
+          # else's releases after a rename or fork.
+          jq --arg v "$v" --arg u "$update_url" \
+            '.version = $v | .update_url = $u' \
+            plugin.json > plugin.tmp
+          mv plugin.tmp plugin.json
+
+          jq --arg v "$v" --arg u "$url" \
+            '.["*"].version = $v | .["*"].download_url = $u' \
+            updater.json > updater.tmp
+          mv updater.tmp updater.json
+
+          jq . plugin.json
+          jq . updater.json
+
+      - name: Commit the version bump
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugin.json updater.json
+          git commit -m "chore: release v${{ steps.version.outputs.version }} [skip ci]"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin HEAD:main --follow-tags
+
+      - name: Build the release archive
+        run: |
+          set -euo pipefail
+          # The panel requires the extracted directory to match `id` in
+          # plugin.json, so the zip must contain an arma3-manager/ root.
+          mkdir -p /tmp/release/arma3-manager
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.gitignore' \
+            --exclude='.gitattributes' \
+            --exclude='tests' \
+            ./ /tmp/release/arma3-manager/
+          cd /tmp/release
+          zip -rq arma3-manager.zip arma3-manager/
+          unzip -l arma3-manager.zip
+
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: /tmp/release/arma3-manager.zip
