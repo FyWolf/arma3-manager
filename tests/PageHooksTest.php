@@ -113,6 +113,46 @@ foreach ($offenders as $offender) {
     echo "       $offender\n";
 }
 
+// ---------------------------------------------------------------------------
+// No Filament upload may gate on MIME type.
+// ---------------------------------------------------------------------------
+//
+// `acceptedFileTypes()` becomes a Laravel `mimetypes:` rule, and for a Livewire
+// upload that resolves through TemporaryUploadedFile::getMimeType() ->
+// Storage::mimeType() -> libmagic **on the server**. A genuine Arma 3 Launcher
+// preset is a UTF-8 BOM, then an XML prolog, then an HTML body, and what
+// libmagic makes of that varies by version and magic database: Windows PHP
+// reports text/xml, and a Linux panel reported something outside a list that
+// already held text/xml, application/xml, text/html, application/xhtml+xml and
+// text/plain.
+//
+// Widening the list is not a fix — it is the same bug waiting for a different
+// server, and it fails with a framework message naming MIME types the customer
+// cannot check. `LauncherPreset::fromFile()` reads the bytes and is the
+// authority. This pins that decision, because re-adding the call looks like an
+// obvious improvement right up until somebody else's libmagic disagrees.
+
+$uploads = [];
+
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root)) as $file) {
+    if ($file->getExtension() !== 'php') {
+        continue;
+    }
+
+    $source = file_get_contents($file->getPathname());
+
+    if (preg_match('/->\s*acceptedFileTypes\s*\(/', $source) === 1) {
+        $uploads[] = $file->getBasename('.php') . ' calls acceptedFileTypes(), which gates uploads on server-side MIME detection. Validate the bytes instead.';
+    }
+}
+
+echo "\nUploads:\n";
+check('no upload gates on MIME type', $uploads, []);
+
+foreach ($uploads as $upload) {
+    echo "       $upload\n";
+}
+
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "Checked $checked page class(es).\n";
 echo "$pass passed, $fail failed\n";
