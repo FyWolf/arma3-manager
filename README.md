@@ -65,7 +65,7 @@ php tests/ModListTest.php                         # 60 load-order assertions
 php tests/LauncherPresetTest.php                  # 84 preset/id/upload assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
-php tests/PageHooksTest.php                       # header-action method names
+php tests/PageHooksTest.php                       # page conventions: header actions, uploads
 php tests/verify-imports.php   /path/to/panel     # every `use` resolves
 php tests/verify-overrides.php /path/to/panel     # no narrowed inherited methods
 ```
@@ -148,6 +148,15 @@ because the obvious-looking check is the weakest one.
   a real 400-mod preset of well under 200 KB.
 - **The upload is never stored.** `->storeFiles(false)` keeps it as a temporary file, read
   once and dropped.
+
+**There is deliberately no MIME check.** `acceptedFileTypes()` becomes a Laravel `mimetypes:`
+rule resolved by libmagic *on the server*, and a real launcher export — UTF-8 BOM, XML prolog,
+HTML body — is classified differently by different libmagic builds. Windows PHP calls it
+`text/xml`; a Linux panel called it something outside a list that already held `text/xml`,
+`application/xml`, `text/html`, `application/xhtml+xml` and `text/plain`. Widening the list is
+not a fix, it is the same bug waiting for a different server, and it fails with a framework
+message naming MIME types the customer cannot check. Reading the bytes is the only check that
+travels. `PageHooksTest.php` fails the build if `acceptedFileTypes()` is reintroduced.
 
 **The `arma:Type` marker check is not a security control.** Anyone can put that meta tag in
 a file. It stops a customer uploading the wrong file and getting a confusing error, which is

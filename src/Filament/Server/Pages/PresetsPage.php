@@ -172,33 +172,35 @@ class PresetsPage extends Page implements HasTable
                 ->schema([
                     FileUpload::make('file')
                         ->label('Preset file')
-                        // Deliberately broad, and it has to be. Filament turns
-                        // this into a server-side `mimetypes:` rule, which is
-                        // resolved by finfo *sniffing the bytes* rather than by
-                        // the extension — and a genuine launcher export begins
-                        // with a UTF-8 BOM followed by an XML prolog, so finfo
-                        // calls it **text/xml**. A list of html types
-                        // therefore rejects every real preset before this
-                        // plugin sees one byte of it, with a Filament
-                        // validation error rather than an explanation.
+                        // There is deliberately no acceptedFileTypes() here.
                         //
-                        // It narrows the file picker and nothing more. What
-                        // actually decides whether a file is accepted is
-                        // LauncherPreset::fromFile(), which reads the bytes.
-                        ->acceptedFileTypes([
-                            'text/xml',
-                            'application/xml',
-                            'text/html',
-                            'application/xhtml+xml',
-                            'text/plain',
-                        ])
+                        // Filament turns it into a Laravel `mimetypes:` rule,
+                        // which for a Livewire upload resolves through
+                        // TemporaryUploadedFile::getMimeType() -> Storage::mimeType()
+                        // -> libmagic **on the server**. A real launcher export
+                        // is a UTF-8 BOM, then an XML prolog, then an HTML body,
+                        // and what libmagic makes of that depends on its version
+                        // and magic database: Windows PHP says text/xml, and at
+                        // least one Linux panel says something outside a list
+                        // that already held text/xml, application/xml,
+                        // text/html, application/xhtml+xml and text/plain.
+                        //
+                        // Guessing the next value is not a fix, it is the same
+                        // bug waiting for a different server — and the failure
+                        // is a framework message naming MIME types the customer
+                        // has no way to check. LauncherPreset::fromFile() reads
+                        // the bytes and is the authority; every refusal it gives
+                        // is a sentence written to be shown to a customer.
+                        //
+                        // The cost is that the file picker no longer pre-filters
+                        // to .html, which is worth it.
                         ->maxSize((int) ceil(LauncherPreset::MAX_BYTES / 1024))
                         // Never written to the panel's disk. The file is read
                         // once, scanned for workshop ids and dropped — there is
                         // no reason to keep a customer's upload afterwards, and
                         // anything kept is something that has to be secured.
                         ->storeFiles(false)
-                        ->helperText('The .html file the Arma 3 Launcher writes. It is read once and never stored.'),
+                        ->helperText('The .html file the Arma 3 Launcher writes (Mods → Preset → Export). Any file is accepted here and checked by reading it, so if it is not a preset you will be told why. It is read once and never stored.'),
 
                     Textarea::make('html')
                         ->label('…or paste the file contents')
