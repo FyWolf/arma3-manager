@@ -59,7 +59,12 @@ check('an empty block yields nothing', WorkshopId::extractAll("  \n "), []);
 
 echo "\nWorkshopId helpers:\n";
 check('url() builds the page link', WorkshopId::url('450814997'), 'https://steamcommunity.com/sharedfiles/filedetails/?id=450814997');
-check('contentPath() is id-based, not title-based', WorkshopId::contentPath('450814997', 107410), 'steamapps/workshop/content/107410/450814997');
+check('contentPath() is id-based, not title-based', WorkshopId::contentPath('450814997', 107410), 'Steam/steamapps/workshop/content/107410/450814997');
+// The default root is the one the stock image actually uses. Pinned because
+// the previous value here — `steamapps/workshop/...` — was wrong, agreed with
+// the code, and so confirmed a path that does not exist on any Arma 3 server.
+check('contentPath() defaults to the image\'s Steam/ root', str_starts_with(WorkshopId::contentPath('1', 107410), 'Steam/steamapps/workshop/'), true);
+check('contentPath() honours an explicit root', WorkshopId::contentPath('450814997', 107410, 'steamapps/workshop'), 'steamapps/workshop/content/107410/450814997');
 
 /**
  * Returns the refusal message, or null when the preset was accepted.

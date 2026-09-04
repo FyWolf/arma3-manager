@@ -150,15 +150,21 @@ class WorkshopId
      * The folder name SteamCMD will leave an item in.
      *
      * Deliberately **not** derived from the item's title. SteamCMD downloads
-     * into `steamapps/workshop/content/<app>/<id>`, and the `@Name` folder the
-     * server loads is created afterwards by the egg's install script from the
-     * mod's own `mod.cpp`. Guessing a folder name from the workshop title gets
-     * it wrong often — titles carry version numbers, emoji and spaces that the
-     * folder does not — so this returns the id-based path, which is the only
-     * one the panel can know for certain.
+     * into `<root>/content/<app>/<id>`, and the `@<id>` folder the server loads
+     * is hard-linked out of it afterwards by the image's entrypoint. Guessing a
+     * folder name from the workshop title gets it wrong often — titles carry
+     * version numbers, emoji and spaces that the folder does not — so this
+     * returns the id-based path, which is the only one the panel can know for
+     * certain.
+     *
+     * `$root` defaults to the stock Arma 3 image's `Steam/steamapps/workshop`
+     * rather than `steamapps/workshop`: `workshop_download_item` runs without
+     * `+force_install_dir`, so SteamCMD uses its own default of `$HOME/Steam`.
+     * Callers that have probed the server pass the root they found — see
+     * `ModService::workshopRoot()`, which is the only thing that knows for sure.
      */
-    public static function contentPath(string $id, int $appId): string
+    public static function contentPath(string $id, int $appId, string $root = 'Steam/steamapps/workshop'): string
     {
-        return 'steamapps/workshop/content/' . $appId . '/' . $id;
+        return trim($root, '/') . '/content/' . $appId . '/' . $id;
     }
 }

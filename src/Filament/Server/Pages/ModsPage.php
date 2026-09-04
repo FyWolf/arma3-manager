@@ -310,7 +310,7 @@ class ModsPage extends Page implements HasTable
                     ->icon(fn (array $record): string => $record['status_icon'])
                     ->color(fn (array $record): string => $record['status_color'])
                     ->tooltip(fn (array $record): string => match ($record['state']) {
-                        'downloaded' => 'On disk, in steamapps/workshop/content.',
+                        'downloaded' => 'On disk — either in the SteamCMD cache under Steam/steamapps/workshop/content, or as the @<id> folder the server loads.',
                         'downloading' => 'SteamCMD is transferring this now. There is no percentage available — its output does not reach the panel — so a large mod sits here for a while and then completes.',
                         'local' => 'Not an @workshopID entry, so nothing downloads it. A Creator DLC ships with the game; a plain folder name has to be uploaded yourself.',
                         default => 'Queued. SteamCMD fetches items one at a time, in order.',

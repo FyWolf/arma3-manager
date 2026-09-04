@@ -45,11 +45,24 @@ use Throwable;
  *
  * ## Which means "is it downloaded?" is now answerable
  *
- * SteamCMD puts an item in `steamapps/workshop/content/<app>/<id>`, a path
+ * SteamCMD puts an item in `<workshop root>/content/<app>/<id>`, a path
  * derivable from the id alone. So `downloadedIds()` lists that directory and
  * every entry it finds *is* an id — no guessing, no name matching. A mod in the
  * load order with no such directory has not been fetched, and that is the number
  * the Mods page leads with.
+ *
+ * **The root is resolved, never hardcoded** — see `workshopRoot()`. This file
+ * used to assume `steamapps/workshop`, which does not exist on the stock Arma 3
+ * image: mods land in `Steam/steamapps/workshop`, because the entrypoint runs
+ * `+workshop_download_item` without `+force_install_dir` and SteamCMD defaults
+ * to `$HOME/Steam`. Only the *game* goes to the server root, installed with an
+ * explicit `+force_install_dir`.
+ *
+ * The cost of that one missing segment is the reason this note is here: the
+ * listing 404s, `listDirectories()` catches it and returns an empty array, so
+ * every mod read as "Waiting" forever, the page claimed the entire load order
+ * was missing from disk, and nothing anywhere logged an error. The download was
+ * working the whole time.
  *
  * ## Writing the manifest as well as the variable
  *
@@ -61,6 +74,13 @@ use Throwable;
  */
 class ModService
 {
+    /**
+     * Resolved workshop root per server id, for this request only.
+     *
+     * @var array<string, string|null>
+     */
+    private array $workshopRootMemo = [];
+
     public function __construct(private DaemonFileRepository $repository) {}
 
     /**
@@ -185,7 +205,48 @@ class ModService
      */
     public function downloadedIds(Server $server, ResolvedProfile $profile): array
     {
-        return $this->workshopIdsIn($server, 'steamapps/workshop/content/');
+        // Two independent signals, unioned, because they answer slightly
+        // different questions and either one alone has a blind spot.
+        //
+        //  - `<root>/content/<app>/<id>` is what SteamCMD fetched.
+        //  - `@<id>` in the server root is the hard-link copy the entrypoint
+        //    makes *after* a successful download, and it is what Arma actually
+        //    loads.
+        //
+        // The second is what makes a hand-uploaded mod count as present, and it
+        // survives an operator clearing the SteamCMD cache to reclaim disk —
+        // which leaves the mod loadable but deletes the content directory. On a
+        // normal download both appear, so the union is the honest answer to
+        // "will this mod load?".
+        return array_values(array_unique(array_merge(
+            $this->workshopIdsIn($server, 'content'),
+            $this->linkedIds($server),
+        )));
+    }
+
+    /**
+     * Workshop ids that have an `@<id>` folder in the server root.
+     *
+     * The entrypoint hard-links a completed item out of the SteamCMD cache and
+     * into `@<id>` (or `@<id>_optional`), and that folder — not the cache — is
+     * what the `-mod=` line names. Matched with `fromModEntry()`, so `@myMod`
+     * and `@vn` are ignored rather than mistaken for ids.
+     *
+     * @return array<int, string>
+     */
+    private function linkedIds(Server $server): array
+    {
+        $ids = [];
+
+        foreach ($this->listDirectories($server, '/') as $name) {
+            $id = WorkshopId::fromModEntry(preg_replace('/_optional$/', '', $name));
+
+            if ($id !== null) {
+                $ids[] = $id;
+            }
+        }
+
+        return $ids;
     }
 
     /**
@@ -213,20 +274,92 @@ class ModService
      */
     public function downloadingIds(Server $server, ResolvedProfile $profile): array
     {
-        return $this->workshopIdsIn($server, 'steamapps/workshop/downloads/');
+        return $this->workshopIdsIn($server, 'downloads');
     }
 
     /**
+     * Ids directly under `<workshop root>/<bucket>/<app>`.
+     *
+     * `$bucket` is `content` or `downloads`; the root itself is resolved once
+     * per request by `workshopRoot()`, because it differs between images.
+     *
      * @return array<int, string>
      */
-    private function workshopIdsIn(Server $server, string $prefix): array
+    private function workshopIdsIn(Server $server, string $bucket): array
     {
+        $root = $this->workshopRoot($server);
+
+        if ($root === null) {
+            return [];
+        }
+
         $appId = (int) config('arma3-manager.workshop.app_id', 107410);
 
         return array_values(array_filter(
-            $this->listDirectories($server, $prefix . $appId),
+            $this->listDirectories($server, $root . '/' . $bucket . '/' . $appId),
             WorkshopId::isValid(...),
         ));
+    }
+
+    /**
+     * The workshop root that resolved, for `diagnose` to print.
+     *
+     * Its own step in the chain, because it is now a place the chain can break:
+     * a null here means every mod reads as "waiting" no matter how healthy the
+     * variable, the parse and the disk are — which is precisely the failure
+     * that hid behind a hardcoded path before.
+     */
+    public function resolvedWorkshopRoot(Server $server): ?string
+    {
+        return $this->workshopRoot($server);
+    }
+
+    /**
+     * Which of the configured workshop roots this server actually uses.
+     *
+     * Probed rather than assumed, and memoised per request per server so a
+     * ninety-mod page costs one extra listing rather than one per row.
+     *
+     * A root counts as the right one when `<root>/content/<app>` **or**
+     * `<root>/downloads/<app>` lists. Probing anything shallower would match a
+     * `Steam/` left behind by an unrelated tool; probing `content` alone would
+     * miss the case that matters most — the very first download, where
+     * `downloads/` exists and `content/` does not yet, so the one page a
+     * customer is actually watching would show "waiting" for every mod while
+     * SteamCMD was visibly working.
+     *
+     * Null means no candidate answered: nothing downloaded yet, or the server
+     * is offline and the daemon is refusing listings. Both report as "no ids",
+     * which reads as "waiting" — honest in both cases, and the reason this
+     * returns null rather than guessing a root.
+     */
+    private function workshopRoot(Server $server): ?string
+    {
+        $key = (string) $server->id;
+
+        if (array_key_exists($key, $this->workshopRootMemo)) {
+            return $this->workshopRootMemo[$key];
+        }
+
+        $appId = (int) config('arma3-manager.workshop.app_id', 107410);
+
+        /** @var array<int, string> $roots */
+        $roots = (array) config('arma3-manager.steamcmd.workshop_roots', ['Steam/steamapps/workshop']);
+
+        foreach ($roots as $root) {
+            $root = trim((string) $root, '/');
+
+            if ($root === '') {
+                continue;
+            }
+
+            if ($this->listDirectories($server, $root . '/content/' . $appId) !== []
+                || $this->listDirectories($server, $root . '/downloads/' . $appId) !== []) {
+                return $this->workshopRootMemo[$key] = $root;
+            }
+        }
+
+        return $this->workshopRootMemo[$key] = null;
     }
 
     /**
