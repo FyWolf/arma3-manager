@@ -2,6 +2,7 @@
 
 namespace FyWolf\Arma3Manager\Support;
 
+use App\Models\EggVariable;
 use App\Models\Server;
 use App\Models\ServerVariable;
 
@@ -14,32 +15,46 @@ use App\Models\ServerVariable;
  * profile carries an ordered list of candidates and this class resolves it
  * against what the server actually has.
  *
- * ## Why writing a variable that does not exist is refused
+ * ## Never read through `$server->variables`
  *
- * The tempting shortcut is to create the missing variable. It fails silently
- * and completely: a `ServerVariable` row is only ever read through the egg's
- * `startup` string, so a variable the egg never declared is interpolated
- * nowhere. The mods would be recorded in the panel, shown in the UI as
- * installed, and never passed to the game. Refusing gives the operator an error
- * naming the variable, which is fixable in thirty seconds by editing the egg.
+ * This is the important rule in this file, and breaking it cost six rounds of
+ * wrong diagnosis.
  *
- * ## Why the value is written through ServerVariable and not through the egg
+ * The panel's `Server::variables()` is a `hasMany` over `egg_variables` with a
+ * left join onto `server_variables`, and the join is constrained inside a
+ * closure that reads **`$this->id`**:
  *
- * `$server->variables` is a *read* projection: it selects egg_variables joined
- * against server_variables and aliases `variable_value` to `server_value`.
- * Assigning to it writes to the egg and changes the value for every server on
- * that egg — one customer's mod list landing on every other customer's server.
- * The write always goes to the pivot row, keyed on both ids.
+ *     ->leftJoin('server_variables', function (JoinClause $join) {
+ *         $join->on('server_variables.variable_id', 'egg_variables.id')
+ *             ->where('server_variables.server_id', $this->id);
+ *     });
+ *
+ * Under **lazy** loading that is the real model and `$this->id` is the server.
+ * Under **eager** loading it is not: Laravel builds the relation with
+ * `Relation::noConstraints(fn () => $model->newInstance()->$name())` — a fresh,
+ * attribute-less instance — so `$this->id` is `null`, the join matches nothing,
+ * and `server_value` comes back null for **every** variable on the server.
+ *
+ * `loadMissing('variables')` and `with('variables')` are both eager. So this
+ * class used to call `loadMissing()` and then read `server_value`, which meant
+ * every read returned "unset" no matter what was stored. The write was fine
+ * throughout — it only needs `egg_variables.id`, which the join cannot corrupt
+ * — so the panel showed the mods, the database held them, and every page in
+ * this plugin showed an empty list.
+ *
+ * Both directions therefore go to the tables directly. It is two small queries
+ * instead of one relation, and it cannot be broken by how somebody else in the
+ * request happened to load the model.
  */
 class ServerVariables
 {
     /**
-     * The value of the first candidate variable that exists on this server.
+     * The value in force for the first candidate that exists on this server.
      *
-     * Null means none of the candidates exist. An existing variable with an
-     * empty value returns the empty string, which is a different answer and one
-     * the caller cares about: "no mod list variable" is a misconfigured egg,
-     * "an empty mod list" is a server with no mods.
+     * Null means none of the candidates exist. An existing variable with no
+     * `server_variables` row falls back to the egg's default, because that is
+     * what the game is actually started with — reporting null there would say
+     * "no such variable" about one that is simply unset.
      *
      * @param array<int, string> $candidates
      */
@@ -47,7 +62,18 @@ class ServerVariables
     {
         $variable = self::resolve($server, $candidates);
 
-        return $variable === null ? null : (string) ($variable->server_value ?? '');
+        if ($variable === null) {
+            return null;
+        }
+
+        $row = ServerVariable::query()
+            ->where('server_id', $server->id)
+            ->where('variable_id', $variable->id)
+            ->first();
+
+        return $row !== null
+            ? (string) $row->variable_value
+            : (string) ($variable->default_value ?? '');
     }
 
     /**
@@ -79,41 +105,61 @@ class ServerVariables
             ['variable_value' => $value],
         );
 
-        // The relation was already loaded to resolve the name, and it caches the
-        // old value. Anything reading it again in this request — the page that
-        // is about to re-render, for instance — would show what was there before
-        // the write.
+        // Anything else in this request that already loaded the relation is
+        // holding the old value. Harmless for our own reads, which no longer go
+        // through it, but the page rendering afterwards may not be ours.
         $server->unsetRelation('variables');
 
         return true;
     }
 
     /**
+     * The egg variable a candidate list resolves to.
+     *
+     * Queried straight off `egg_variables` rather than through the server's
+     * relation — see the class note. Ordered by the candidate list rather than
+     * by the table, so the profile's preference wins deterministically instead
+     * of depending on row order.
+     *
      * @param array<int, string> $candidates
      */
-    private static function resolve(Server $server, array $candidates): mixed
+    private static function resolve(Server $server, array $candidates): ?EggVariable
     {
         if ($candidates === []) {
             return null;
         }
 
-        $server->loadMissing('variables');
+        $variables = EggVariable::query()
+            ->where('egg_id', $server->egg_id)
+            ->get(['id', 'env_variable', 'default_value']);
 
-        $wanted = array_map('strtoupper', $candidates);
-
-        // Ordered by the candidate list, not by the server's own ordering: the
-        // profile lists them most-specific first and the first match must win
-        // deterministically. Iterating the server's variables instead would
-        // make the answer depend on egg_variables row order.
-        foreach ($wanted as $name) {
-            foreach ($server->variables as $variable) {
-                if (strtoupper((string) $variable->env_variable) === $name) {
+        foreach (array_map('strtoupper', $candidates) as $wanted) {
+            foreach ($variables as $variable) {
+                if (strtoupper((string) $variable->env_variable) === $wanted) {
                     return $variable;
                 }
             }
         }
 
         return null;
+    }
+
+    /**
+     * Every variable name the egg declares, for an error that can name them.
+     *
+     * @return array<int, string>
+     */
+    public static function declared(Server $server): array
+    {
+        $names = EggVariable::query()
+            ->where('egg_id', $server->egg_id)
+            ->pluck('env_variable')
+            ->map(static fn ($name): string => (string) $name)
+            ->all();
+
+        sort($names);
+
+        return $names;
     }
 
     /**

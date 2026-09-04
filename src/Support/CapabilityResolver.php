@@ -192,14 +192,14 @@ class CapabilityResolver
             return false;
         }
 
-        foreach ($server->variables as $variable) {
-            if (in_array(strtoupper((string) $variable->env_variable), $names, true)
-                && in_array(trim((string) $variable->server_value ?? ''), $wanted, true)) {
-                return true;
-            }
-        }
+        // Through ServerVariables, not `$server->variables`. That relation's
+        // join is constrained on `$this->id`, which is null while Laravel is
+        // eager loading, so `server_value` reads as unset for every variable —
+        // see the note on ServerVariables. Here that would have meant an Arma
+        // egg going undetected whenever the app id was only set per-server.
+        $value = ServerVariables::read($server, $names);
 
-        return false;
+        return $value !== null && in_array(trim($value), $wanted, true);
     }
 
     /**
