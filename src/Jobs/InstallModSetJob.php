@@ -29,7 +29,7 @@ use Throwable;
  *
  * So the job ends at `AwaitingDownload` and that is a **success**, not a
  * timeout. The load order is written, the manifest is written, and the customer
- * is told to reinstall or restart so the egg's install script fetches what is
+ * is told to start the server so the egg fetches what is
  * now listed. Treating the handover as a failure would have marked every
  * successful install failed.
  *
@@ -138,7 +138,7 @@ class InstallModSetJob implements ShouldQueue
             $order = $mods->loadOrder($server, $profile);
 
             foreach ($resolved as $id) {
-                $order->add($id);
+                $order->add(WorkshopId::modEntry($id));
             }
 
             $mods->saveLoadOrder($server, $profile, $order);
@@ -152,7 +152,7 @@ class InstallModSetJob implements ShouldQueue
                     $id = is_array($mod) ? WorkshopId::extract((string) ($mod['id'] ?? '')) : null;
 
                     if ($id !== null) {
-                        $serverOrder->add($id);
+                        $serverOrder->add(WorkshopId::modEntry($id));
                     }
                 }
 

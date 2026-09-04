@@ -105,6 +105,48 @@ class WorkshopId
     }
 
     /**
+     * The mod-list entry for a Workshop id: `@` followed by the id.
+     *
+     * ## Why the `@` is not decoration
+     *
+     * The egg's own field documents it: *"Any mods in this list that are in
+     * `@workshopID` form will also be included in Automatic Updates"*, and
+     * *"NO capital letters, spaces, or folders starting with a number"*.
+     *
+     * Both halves matter. The `@` is what marks an entry as a Workshop item
+     * rather than a hand-uploaded folder, so it is what makes the mod download
+     * at all — a bare id is read as a folder name and fetched by nothing. And a
+     * bare id would violate the "no folder starting with a number" rule anyway,
+     * which is exactly the rule the `@` prefix exists to satisfy.
+     *
+     * Digits carry no case, so an `@`-prefixed id also satisfies the
+     * no-capitals rule for free.
+     */
+    public static function modEntry(string $id): string
+    {
+        return '@' . ltrim(trim($id), '@');
+    }
+
+    /**
+     * The Workshop id behind a mod-list entry, or null if it is not one.
+     *
+     * Strict on purpose — `@` followed by digits and nothing else. The list
+     * legitimately mixes Workshop items with CDLC codes (`vn`, `gm`) and
+     * hand-uploaded folder names, and only the first kind can be downloaded or
+     * looked up on Steam.
+     *
+     * Deliberately not `extract()`, which is written to be forgiving of things
+     * a human pastes and would read the `2024` out of a folder called
+     * `mymod2024` — turning a local mod into a Workshop id that does not exist.
+     */
+    public static function fromModEntry(string $entry): ?string
+    {
+        return preg_match('/^@(\d{4,20})$/', trim($entry), $matches) === 1
+            ? $matches[1]
+            : null;
+    }
+
+    /**
      * The folder name SteamCMD will leave an item in.
      *
      * Deliberately **not** derived from the item's title. SteamCMD downloads

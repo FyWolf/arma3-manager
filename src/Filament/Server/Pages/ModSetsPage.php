@@ -169,7 +169,7 @@ class ModSetsPage extends Page implements HasTable
                     ->visible(fn (array $record): bool => $this->canInstall() && ! $record['busy'])
                     ->requiresConfirmation()
                     ->modalHeading(fn (array $record): string => 'Install ' . $record['name'] . '?')
-                    ->modalDescription('Adds every mod in the set to the load order, dependencies first and in the right order. The files are not downloaded by the panel — reinstall the server afterwards so SteamCMD fetches them with your own Steam account. Nothing already in your load order is removed.')
+                    ->modalDescription('Adds every mod in the set to the load order, dependencies first and in the right order. The files are not downloaded by the panel — start the server and the egg fetches them with your own Steam account, with progress on the Mods page. Nothing already in your load order is removed.')
                     ->action(fn (array $record) => $this->install((string) $record['key'])),
             ]);
     }

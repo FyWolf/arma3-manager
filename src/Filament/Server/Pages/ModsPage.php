@@ -119,6 +119,80 @@ class ModsPage extends Page implements HasTable
             && (user()?->can(SubuserPermission::FileUpdate, $this->server()) ?? false);
     }
 
+    /**
+     * What is on disk, read once per request.
+     *
+     * SteamCMD stages an item in `steamapps/workshop/downloads/<app>/<id>` while
+     * it transfers and **moves** it to `content/<app>/<id>` when it completes,
+     * so these two listings are the whole progress display. The table body and
+     * the summary line both want them, and each is a round trip to the daemon.
+     *
+     * @var array{downloaded: array<int, string>, downloading: array<int, string>}|null
+     */
+    private ?array $diskMemo = null;
+
+    /**
+     * @return array{downloaded: array<int, string>, downloading: array<int, string>}
+     */
+    private function disk(): array
+    {
+        if ($this->diskMemo !== null) {
+            return $this->diskMemo;
+        }
+
+        $mods = app(ModService::class);
+
+        return $this->diskMemo = [
+            'downloaded' => $mods->downloadedIds($this->server(), $this->profile()),
+            'downloading' => $mods->downloadingIds($this->server(), $this->profile()),
+        ];
+    }
+
+    /**
+     * The line above the table: how far the download has got.
+     *
+     * Null when there is nothing in the load order, so an empty server gets its
+     * empty state rather than "0 of 0 downloaded".
+     *
+     * `loadOrder()` is read again here rather than passed down — it is a server
+     * variable, not a daemon call, so it costs nothing next to the listings the
+     * memo above is protecting.
+     */
+    private function downloadSummary(): ?string
+    {
+        $order = app(ModService::class)->loadOrder($this->server(), $this->profile())->all();
+
+        // Only the Workshop entries have a download to count. Including a CDLC
+        // or a hand-uploaded folder would make the total unreachable.
+        $ids = array_values(array_filter(array_map(WorkshopId::fromModEntry(...), $order)));
+
+        if ($ids === []) {
+            return null;
+        }
+
+        ['downloaded' => $downloaded, 'downloading' => $downloading] = $this->disk();
+
+        $done = count(array_intersect($ids, $downloaded));
+        $active = count(array_intersect($ids, $downloading));
+        $waiting = max(0, count($ids) - $done - $active);
+
+        if ($done === count($ids)) {
+            return 'All ' . $done . ' Workshop mod(s) downloaded. Restart the server to load them.';
+        }
+
+        $parts = [$done . ' of ' . count($ids) . ' downloaded'];
+
+        if ($active > 0) {
+            $parts[] = $active . ' downloading';
+        }
+
+        if ($waiting > 0) {
+            $parts[] = $waiting . ' waiting';
+        }
+
+        return implode(' · ', $parts) . '. This page updates itself.';
+    }
+
     public function content(Schema $schema): Schema
     {
         return $schema->components([EmbeddedTable::make()]);
@@ -135,36 +209,73 @@ class ModsPage extends Page implements HasTable
                 $order = $mods->loadOrder($server, $profile);
                 $serverOrder = $mods->serverLoadOrder($server, $profile);
 
-                // What SteamCMD has actually fetched, read from the content
-                // directory it writes into. The directory names *are* the ids,
-                // so this is an exact answer rather than a name match.
-                $downloaded = $mods->downloadedIds($server, $profile);
+                // Memoised, because the table body and the summary line above
+                // it both need the same answer and each lookup is a round trip
+                // to the daemon. Without this a five-second poll on a ninety-mod
+                // list is four directory listings a tick instead of two.
+                ['downloaded' => $downloaded, 'downloading' => $downloading] = $this->disk();
 
                 // One batched lookup for every id on the page, so the table
                 // shows "ACE3" rather than a column of numbers. Cached, and a
                 // Steam outage degrades to showing the id — which is still the
                 // thing the customer can paste into a workshop URL.
-                $titles = app(SteamWorkshopClient::class)->items([
-                    ...$order->all(),
-                    ...$serverOrder->all(),
-                ]);
+                $titles = app(SteamWorkshopClient::class)->items(array_filter(array_map(
+                    WorkshopId::fromModEntry(...),
+                    [...$order->all(), ...$serverOrder->all()],
+                )));
 
                 $records = [];
                 $position = 1;
 
-                $build = function (string $entry, string $scope, int $position) use ($downloaded, $titles): array {
-                    $present = in_array($entry, $downloaded, true);
+                $build = function (string $entry, string $scope, int $position) use ($downloaded, $downloading, $titles): array {
+                    // The list is deliberately mixed — `myMod;vn;@123456789;` —
+                    // so an entry is a Workshop item only when it is `@` plus
+                    // digits. A CDLC code or a hand-uploaded folder has no
+                    // download to report and must not be shown as "Waiting"
+                    // forever, because nothing will ever fetch it.
+                    $id = WorkshopId::fromModEntry($entry);
+
+                    $state = match (true) {
+                        $id === null => 'local',
+                        in_array($id, $downloaded, true) => 'downloaded',
+                        in_array($id, $downloading, true) => 'downloading',
+                        default => 'waiting',
+                    };
 
                     return [
                         'entry' => $entry,
                         'position' => $position,
-                        'name' => $titles[$entry]->title ?? $entry,
-                        'id' => $entry,
+                        'name' => $id !== null ? ($titles[$id]->title ?? $entry) : $entry,
+                        'id' => $id,
+                        // The egg's field refuses capitals, spaces and folders
+                        // starting with a number. Anything this plugin writes
+                        // complies, but a hand-edited entry might not, and the
+                        // failure is the whole list being rejected rather than
+                        // that one entry.
+                        'invalid' => preg_match('/^[a-z0-9_@.\-]+$/', $entry) !== 1
+                            || preg_match('/^\d/', $entry) === 1,
                         'scope' => $scope,
-                        'present' => $present,
-                        'status' => $present ? 'Downloaded' : 'Not downloaded',
-                        'status_color' => $present ? 'success' : 'danger',
-                        'url' => WorkshopId::isValid($entry) ? WorkshopId::url($entry) : null,
+                        'state' => $state,
+                        'present' => $state === 'downloaded',
+                        'status' => match ($state) {
+                            'downloaded' => 'Downloaded',
+                            'downloading' => 'Downloading',
+                            'local' => 'Not from the Workshop',
+                            default => 'Waiting',
+                        },
+                        'status_color' => match ($state) {
+                            'downloaded' => 'success',
+                            'downloading' => 'info',
+                            'local' => 'warning',
+                            default => 'gray',
+                        },
+                        'status_icon' => match ($state) {
+                            'downloaded' => 'tabler-circle-check',
+                            'downloading' => 'tabler-progress',
+                            'local' => 'tabler-folder',
+                            default => 'tabler-clock',
+                        },
+                        'url' => $id !== null ? WorkshopId::url($id) : null,
                     ];
                 };
 
@@ -186,20 +297,36 @@ class ModsPage extends Page implements HasTable
                 TextColumn::make('name')
                     ->label('Mod')
                     ->weight('bold')
-                    ->description(fn (array $record): string => 'Workshop id ' . $record['id']),
+                    ->description(fn (array $record): string => $record['entry'])
+                    ->icon(fn (array $record): ?string => $record['invalid'] ? 'tabler-alert-triangle' : null)
+                    ->iconColor('danger')
+                    ->tooltip(fn (array $record): ?string => $record['invalid']
+                        ? 'This entry breaks the field\'s rules — no capital letters, no spaces, and it may not start with a number. The egg may reject the whole list.'
+                        : null),
                 TextColumn::make('scope')->label('Loaded by')->badge()->color('gray'),
                 TextColumn::make('status')
-                    ->label('Files')
+                    ->label('Download')
                     ->badge()
+                    ->icon(fn (array $record): string => $record['status_icon'])
                     ->color(fn (array $record): string => $record['status_color'])
-                    ->tooltip(fn (array $record): string => $record['present']
-                        ? 'SteamCMD has fetched this into steamapps/workshop/content.'
-                        : 'Not on disk yet. Reinstall the server so SteamCMD fetches it.'),
+                    ->tooltip(fn (array $record): string => match ($record['state']) {
+                        'downloaded' => 'On disk, in steamapps/workshop/content.',
+                        'downloading' => 'SteamCMD is transferring this now. There is no percentage available — its output does not reach the panel — so a large mod sits here for a while and then completes.',
+                        'local' => 'Not an @workshopID entry, so nothing downloads it. A Creator DLC ships with the game; a plain folder name has to be uploaded yourself.',
+                        default => 'Queued. SteamCMD fetches items one at a time, in order.',
+                    }),
             ])
             // Deliberately not sortable and not searchable: see the class note.
             // Order is meaning here, and a sort control is an invitation to
             // destroy it.
             ->paginated(false)
+            // The download runs on the server, not here, so the only way to
+            // show it moving is to keep asking. Five seconds is two directory
+            // listings per tick against a daemon that is already serving the
+            // file manager; anything faster buys nothing, because SteamCMD
+            // moves an item into place in one step.
+            ->poll('5s')
+            ->description(fn (): ?string => $this->downloadSummary())
             ->emptyStateHeading('No mods in the load order')
             ->emptyStateDescription('Add one from the Workshop page, import a launcher preset, or install a mod set.')
             ->recordActions([
@@ -266,7 +393,7 @@ class ModsPage extends Page implements HasTable
                 ->visible(fn (): bool => $this->canEdit())
                 ->requiresConfirmation()
                 ->modalHeading('Write the mod list to the server')
-                ->modalDescription('Saves the load order to this server\'s startup variable and writes the manifest. Arma reads both only at startup, so restart the server — or reinstall it, if the mods still need downloading.')
+                ->modalDescription('Saves the load order to this server\'s startup variable and writes the manifest. The egg fetches anything new the next time the server starts, and this page shows it arriving.')
                 ->action(function (): void {
                     try {
                         $mods = app(ModService::class);
@@ -285,7 +412,7 @@ class ModsPage extends Page implements HasTable
                             ->title('Mod list written')
                             ->body($missing === []
                                 ? 'Every mod in the load order is already on disk. Restart to apply.'
-                                : count($missing) . ' mod(s) still need downloading — reinstall the server so SteamCMD fetches them.')
+                                : count($missing) . ' mod(s) still need downloading. Start the server and they will be fetched — this page shows the progress.')
                             ->success()
                             ->send();
                     } catch (Throwable $exception) {

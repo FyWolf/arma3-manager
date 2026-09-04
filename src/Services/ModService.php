@@ -15,24 +15,33 @@ use Throwable;
 /**
  * The load order, and the gap between it and what is on disk.
  *
- * ## The list is Workshop ids, not folder names
+ * ## The list is `@workshopID` entries
  *
- * This is the whole shape of the class and it was wrong once, so it is worth
- * stating plainly.
+ * This is the whole shape of the class and it has been wrong twice, so it is
+ * worth quoting the egg field itself:
  *
- * The variable holds **semicolon-separated Workshop ids** — `450814997;463939057`
- * — because the thing that reads it is the egg's install script, and the only
- * value SteamCMD can act on is an id: `workshop_download_item 107410 <id>`.
+ *   > A semicolon-separated list of additional mod folders to load. […] Any
+ *   > mods in this list that are in "@workshopID" form will also be included in
+ *   > Automatic Updates. NO capital letters, spaces, or folders starting with a
+ *   > number! (ex. myMod;vn;@123456789;@987654321;etc;)
  *
- * An earlier version wrote `@Folder` names derived from each mod's Steam title
- * with a regex. That is unusable twice over. The install script cannot download
- * a name, so nothing was ever fetched; and the guess was wrong anyway, because
- * the real folder comes from the mod's own `mod.cpp` and a title like
- * "[AFR] - Arma Factions Reimagined" sanitises to something no publisher chose.
+ * So one field is both the load order *and* the download trigger, and a Workshop
+ * item is written as **`@` followed by its id** — `@450814997;@463939057;`.
  *
- * The `-mod=` folder list is therefore **not** this plugin's job. It is built by
- * the install script after download, which is the only place the real folder
- * names are known.
+ * Two earlier attempts got this wrong in opposite directions. The first wrote
+ * `@Folder` names guessed from each mod's Steam title, which downloads nothing
+ * (the egg matches on `@<digits>`, not on a name) and did not match the real
+ * folder either, since that comes from the mod's own `mod.cpp`. The second
+ * wrote bare ids, which the egg reads as a folder name — and a folder starting
+ * with a number is the one thing the field explicitly forbids.
+ *
+ * ## The list is deliberately mixed
+ *
+ * The example is `myMod;vn;@123456789;etc;`. Alongside Workshop items it
+ * legitimately carries CDLC short codes and hand-uploaded folder names, neither
+ * of which is downloadable and neither of which has a Steam id. Anything
+ * reading this list has to tolerate all three, which is why entries are matched
+ * with `WorkshopId::fromModEntry()` rather than assumed to be ids.
  *
  * ## Which means "is it downloaded?" is now answerable
  *
@@ -86,7 +95,10 @@ class ModService
             throw new RuntimeException(trans('arma3-manager::strings.variable_missing', ['names' => 'mod list']));
         }
 
-        if (! ServerVariables::write($server, $candidates, $mods->renderPlain())) {
+        // render(), not renderPlain(): the egg's documented example ends in a
+        // separator — `myMod;vn;@123456789;@987654321;etc;` — so that is the
+        // shape it is known to parse.
+        if (! ServerVariables::write($server, $candidates, $mods->render())) {
             throw new RuntimeException(trans('arma3-manager::strings.variable_missing', [
                 'names' => implode(' / ', $candidates),
             ]));
@@ -173,27 +185,115 @@ class ModService
      */
     public function downloadedIds(Server $server, ResolvedProfile $profile): array
     {
+        return $this->workshopIdsIn($server, 'steamapps/workshop/content/');
+    }
+
+    /**
+     * Workshop ids SteamCMD is fetching right now.
+     *
+     * ## Where the three states come from
+     *
+     * SteamCMD stages an item in `steamapps/workshop/downloads/<app>/<id>` while
+     * it is transferring, then **moves** it into `content/<app>/<id>` when the
+     * item is complete. Those are two different directories on disk, so the
+     * distinction is real rather than inferred:
+     *
+     *   in `downloads/` .. downloading now
+     *   in `content/` ... finished
+     *   in neither ..... queued, not started
+     *
+     * That is the whole progress display, and it costs two directory listings.
+     * It is also the only honest granularity available: SteamCMD's own transfer
+     * output never reaches the panel, so a percentage *within* one item cannot
+     * be shown. A 10 GB mod therefore sits on "downloading" for a long time and
+     * then completes, which is worth saying on screen rather than faking with a
+     * bar that moves.
+     *
+     * @return array<int, string>
+     */
+    public function downloadingIds(Server $server, ResolvedProfile $profile): array
+    {
+        return $this->workshopIdsIn($server, 'steamapps/workshop/downloads/');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function workshopIdsIn(Server $server, string $prefix): array
+    {
         $appId = (int) config('arma3-manager.workshop.app_id', 107410);
 
         return array_values(array_filter(
-            $this->listDirectories($server, 'steamapps/workshop/content/' . $appId),
+            $this->listDirectories($server, $prefix . $appId),
             WorkshopId::isValid(...),
         ));
     }
 
     /**
-     * Entries in the load order that have not been downloaded.
+     * A count of each state across the whole load order.
+     *
+     * Read once per render and handed to the table, so a ninety-mod list is two
+     * directory listings rather than two per row.
+     *
+     * @return array{total: int, downloaded: int, downloading: int, waiting: int}
+     */
+    public function downloadProgress(Server $server, ResolvedProfile $profile): array
+    {
+        $downloaded = $this->downloadedIds($server, $profile);
+        $downloading = $this->downloadingIds($server, $profile);
+
+        $total = 0;
+        $done = 0;
+        $active = 0;
+
+        foreach ($this->loadOrder($server, $profile)->all() as $entry) {
+            $id = WorkshopId::fromModEntry($entry);
+
+            // Only Workshop entries have a download to be part of.
+            if ($id === null) {
+                continue;
+            }
+
+            $total++;
+
+            if (in_array($id, $downloaded, true)) {
+                $done++;
+            } elseif (in_array($id, $downloading, true)) {
+                $active++;
+            }
+        }
+
+        return [
+            'total' => $total,
+            'downloaded' => $done,
+            'downloading' => $active,
+            'waiting' => max(0, $total - $done - $active),
+        ];
+    }
+
+    /**
+     * Workshop entries in the load order that have not been downloaded.
+     *
+     * Non-Workshop entries — CDLC codes, hand-uploaded folders — are skipped
+     * rather than counted as missing. Nothing downloads them, so reporting them
+     * as outstanding would mean the count never reaches zero.
      *
      * @return array<int, string>
      */
     public function missing(Server $server, ResolvedProfile $profile): array
     {
         $downloaded = $this->downloadedIds($server, $profile);
+        $out = [];
 
-        return array_values(array_filter(
-            $this->loadOrder($server, $profile)->all(),
-            static fn (string $id): bool => ! in_array($id, $downloaded, true),
-        ));
+        foreach ($this->loadOrder($server, $profile)->all() as $entry) {
+            $id = WorkshopId::fromModEntry($entry);
+
+            if ($id !== null && ! in_array($id, $downloaded, true)) {
+                $out[] = $entry;
+            }
+        }
+
+        return $out;
     }
 
     /**

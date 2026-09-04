@@ -129,7 +129,10 @@ class PresetsPage extends Page implements HasTable
         return $table
             ->records(function (): array {
                 $order = app(ModService::class)->loadOrder($this->server(), $this->profile());
-                $titles = app(SteamWorkshopClient::class)->items($order->all());
+                $titles = app(SteamWorkshopClient::class)->items(array_filter(array_map(
+                    WorkshopId::fromModEntry(...),
+                    $order->all(),
+                )));
 
                 $records = [];
                 $position = 1;
@@ -141,7 +144,7 @@ class PresetsPage extends Page implements HasTable
                         // The title when Steam knows it, the id otherwise. The
                         // load order is ids, and a column of bare numbers is not
                         // something anyone can check against their launcher.
-                        'name' => $titles[$entry]->title ?? $entry,
+                        'name' => $titles[WorkshopId::fromModEntry($entry) ?? '']->title ?? $entry,
                     ];
                 }
 
@@ -152,7 +155,7 @@ class PresetsPage extends Page implements HasTable
                 TextColumn::make('name')
                     ->label('Mod')
                     ->weight('bold')
-                    ->description(fn (array $record): string => 'Workshop id ' . $record['entry']),
+                    ->description(fn (array $record): string => $record['entry']),
             ])
             ->paginated(false)
             ->emptyStateHeading('Nothing in the load order yet')
@@ -314,9 +317,9 @@ class PresetsPage extends Page implements HasTable
                     continue;
                 }
 
-                // The id itself. See WorkshopPage for why a name is useless
-                // here — the install script downloads by id or not at all.
-                $order->add($item->id);
+                // `@` + the id — see WorkshopPage for why the prefix is what
+                // makes it download.
+                $order->add(WorkshopId::modEntry($item->id));
             }
 
             $mods->saveLoadOrder($server, $profile, $order);
@@ -337,7 +340,7 @@ class PresetsPage extends Page implements HasTable
                     $added . ' mod(s) now in the load order.'
                     . ($unknown > 0 ? " {$unknown} item(s) could not be resolved on Steam and were skipped." : '')
                     . ($preset->dlc !== [] ? ' ' . count($preset->dlc) . ' Creator DLC in the preset were not imported — enable those on the Parameters page.' : '')
-                    . ' The files still need downloading: reinstall the server so SteamCMD fetches them.'
+                    . ' Start the server to fetch them — the Mods page shows each one arriving.'
                 ))
                 ->success()
                 ->send();
@@ -392,7 +395,13 @@ class PresetsPage extends Page implements HasTable
         // a name from the folder and then search Steam to find the id back
         // again — a round trip that needed an API key, produced fewer rows than
         // the server actually runs, and could match the wrong mod outright.
-        $ids = array_values(array_filter($order->all(), WorkshopId::isValid(...)));
+        // Only the Workshop entries. A CDLC code or a hand-uploaded folder has
+        // no Steam id and no place in a launcher preset, so it is left out
+        // rather than exported as a row the launcher would reject.
+        $ids = array_values(array_filter(array_map(
+            WorkshopId::fromModEntry(...),
+            $order->all(),
+        )));
         $items = app(SteamWorkshopClient::class)->items($ids);
 
         $mods = [];
