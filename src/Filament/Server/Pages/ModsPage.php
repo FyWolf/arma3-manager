@@ -232,7 +232,7 @@ class ModsPage extends Page implements HasTable
                 // written to degrade to what the directory listings said.
                 $status = $mods->status($server);
 
-                $build = function (string $entry, string $scope, int $position) use ($downloaded, $downloading, $titles, $status): array {
+                $build = function (string $entry, string $scope, bool $serverOnly, int $position) use ($downloaded, $downloading, $titles, $status): array {
                     // The list is deliberately mixed — `myMod;vn;@123456789;` —
                     // so an entry is a Workshop item only when it is `@` plus
                     // digits. A CDLC code or a hand-uploaded folder has no
@@ -275,6 +275,11 @@ class ModsPage extends Page implements HasTable
                         'invalid' => preg_match('/^[a-z0-9_@.\-]+$/', $entry) !== 1
                             || preg_match('/^\d/', $entry) === 1,
                         'scope' => $scope,
+                        // Which of the two lists this row came from, carried
+                        // explicitly rather than re-derived from the entry.
+                        // A mod may legally be in both, so "look it up again"
+                        // finds the wrong one and acts on the wrong row.
+                        'server_only' => $serverOnly,
                         'state' => $state,
                         'present' => $state === 'downloaded',
                         'status' => match ($state) {
@@ -307,14 +312,14 @@ class ModsPage extends Page implements HasTable
                 };
 
                 foreach ($order->all() as $entry) {
-                    $records[$entry] = $build($entry, 'Client + server', $position++);
+                    $records[$entry] = $build($entry, 'Client + server', false, $position++);
                 }
 
                 foreach ($serverOrder->all() as $entry) {
                     // Keyed on a prefix so a mod that is in both lists — which
                     // is legal and occasionally deliberate — renders as two
                     // rows rather than one overwriting the other.
-                    $records['server:' . $entry] = $build($entry, 'Server only', $position++);
+                    $records['server:' . $entry] = $build($entry, 'Server only', true, $position++);
                 }
 
                 return $records;
@@ -368,14 +373,41 @@ class ModsPage extends Page implements HasTable
                     ->icon('tabler-arrow-up')
                     ->iconButton()
                     ->visible(fn (): bool => $this->canEdit())
-                    ->action(fn (array $record) => $this->move($record['entry'], -1)),
+                    ->action(fn (array $record) => $this->move($record['entry'], -1, $record['server_only'])),
 
                 Action::make('down')
                     ->label('Move down')
                     ->icon('tabler-arrow-down')
                     ->iconButton()
                     ->visible(fn (): bool => $this->canEdit())
-                    ->action(fn (array $record) => $this->move($record['entry'], 1)),
+                    ->action(fn (array $record) => $this->move($record['entry'], 1, $record['server_only'])),
+
+                Action::make('scope')
+                    ->label(fn (array $record): string => $record['server_only']
+                        ? 'Load on clients too'
+                        : 'Make server-only')
+                    ->icon(fn (array $record): string => $record['server_only']
+                        ? 'tabler-users'
+                        : 'tabler-server')
+                    ->color('gray')
+                    ->iconButton()
+                    ->visible(fn (): bool => $this->canEdit() && $this->hasServerModList())
+                    ->requiresConfirmation()
+                    ->modalHeading(fn (array $record): string => $record['server_only']
+                        ? 'Load ' . $record['name'] . ' on clients too?'
+                        : 'Make ' . $record['name'] . ' server-only?')
+                    // The two directions are not mirror images, and the
+                    // dangerous one is worth spelling out. `-serverMod=` mods
+                    // are not required of clients, so moving a *content* mod
+                    // there is how you get every player kicked for a missing
+                    // addon — the server loads it, nobody else does.
+                    ->modalDescription(fn (array $record): string => $record['server_only']
+                        ? 'Moves it to the main mod list, so clients must load it as well. This is what a content mod — a map, a weapons pack, ACE — needs in order to work.'
+                        : 'Moves it to -serverMod=, which the server loads and clients do not. Correct for admin tools and server-side scripts. Wrong for anything that adds content: clients will not have it, and with verifySignatures on they will be kicked for a missing addon.')
+                    ->modalSubmitActionLabel(fn (array $record): string => $record['server_only']
+                        ? 'Load on clients too'
+                        : 'Make server-only')
+                    ->action(fn (array $record) => $this->setScope($record['entry'], ! $record['server_only'])),
 
                 Action::make('view')
                     ->label('View on Steam')
@@ -394,8 +426,22 @@ class ModsPage extends Page implements HasTable
                     ->requiresConfirmation()
                     ->modalHeading(fn (array $record): string => 'Remove ' . $record['name'] . '?')
                     ->modalDescription('Takes it out of the load order. The files stay on disk until you delete them from the file manager, so this is easy to undo.')
-                    ->action(fn (array $record) => $this->remove($record['entry'])),
+                    ->action(fn (array $record) => $this->remove($record['entry'], $record['server_only'])),
             ]);
+    }
+
+    /**
+     * Whether this server's egg has a server-only mod list at all.
+     *
+     * A profile can legitimately have none — a headless client joins a mission
+     * and hosts nothing, so `-serverMod=` is meaningless there and the egg does
+     * not declare a variable for it. Offering the switch anyway would produce an
+     * action that can only ever fail, with an error naming a variable the
+     * customer cannot add.
+     */
+    private function hasServerModList(): bool
+    {
+        return app(ModService::class)->serverModVariables($this->profile()) !== [];
     }
 
     /**
@@ -463,7 +509,15 @@ class ModsPage extends Page implements HasTable
         ];
     }
 
-    private function move(string $entry, int $delta): void
+    /**
+     * Reorder within whichever list the row came from.
+     *
+     * `$serverOnly` is passed in rather than looked up. Reordering used to read
+     * the client list unconditionally, so the arrows on a server-only row found
+     * no index and returned — a button that did nothing, said nothing, and left
+     * the customer clicking it.
+     */
+    private function move(string $entry, int $delta, bool $serverOnly = false): void
     {
         if (! $this->canEdit()) {
             Notification::make()->title(trans('arma3-manager::strings.permission_denied'))->danger()->send();
@@ -476,14 +530,17 @@ class ModsPage extends Page implements HasTable
             $server = $this->server();
             $profile = $this->profile();
 
-            $order = $mods->loadOrder($server, $profile);
+            $order = $serverOnly
+                ? $mods->serverLoadOrder($server, $profile)
+                : $mods->loadOrder($server, $profile);
+
             $index = $order->indexOf($entry);
 
             if ($index === null) {
                 return;
             }
 
-            $mods->saveLoadOrder($server, $profile, $order->move($entry, $index + $delta));
+            $mods->saveLoadOrder($server, $profile, $order->move($entry, $index + $delta), serverOnly: $serverOnly);
 
             Activity::event('server:arma3.mod-reorder')->property(['mod' => $entry])->log();
         } catch (Throwable $exception) {
@@ -493,7 +550,16 @@ class ModsPage extends Page implements HasTable
         }
     }
 
-    private function remove(string $entry): void
+    /**
+     * Remove from whichever list the row came from.
+     *
+     * Also passed in rather than searched for. The old "is it in the client
+     * list? then remove it from there" test is wrong for a mod that is in
+     * **both**, which the table deliberately renders as two rows: pressing
+     * Remove on the server-only row removed the client entry instead, and the
+     * row the customer clicked stayed exactly where it was.
+     */
+    private function remove(string $entry, bool $serverOnly = false): void
     {
         if (! $this->canEdit()) {
             Notification::make()->title(trans('arma3-manager::strings.permission_denied'))->danger()->send();
@@ -506,14 +572,11 @@ class ModsPage extends Page implements HasTable
             $server = $this->server();
             $profile = $this->profile();
 
-            $order = $mods->loadOrder($server, $profile);
+            $order = $serverOnly
+                ? $mods->serverLoadOrder($server, $profile)
+                : $mods->loadOrder($server, $profile);
 
-            if ($order->has($entry)) {
-                $mods->saveLoadOrder($server, $profile, $order->remove($entry));
-            } else {
-                $serverOrder = $mods->serverLoadOrder($server, $profile);
-                $mods->saveLoadOrder($server, $profile, $serverOrder->remove($entry), serverOnly: true);
-            }
+            $mods->saveLoadOrder($server, $profile, $order->remove($entry), serverOnly: $serverOnly);
 
             Activity::event('server:arma3.mod-remove')->property(['mod' => $entry])->log();
 
@@ -522,6 +585,81 @@ class ModsPage extends Page implements HasTable
             report($exception);
 
             Notification::make()->title('Could not remove')->body($exception->getMessage())->danger()->send();
+        }
+    }
+
+    /**
+     * Move one mod between the client list and the server-only list.
+     *
+     * ## Add first, remove second
+     *
+     * These are two separate startup variables, so this is two writes and there
+     * is no transaction across them. The order is therefore chosen for how it
+     * fails, not for tidiness:
+     *
+     *   add-then-remove  — a failure leaves the mod in **both** lists
+     *   remove-then-add  — a failure leaves the mod in **neither**
+     *
+     * Being in both is legal, visible on this page as two rows, and fixed by
+     * pressing the button again. Being in neither is a mod that silently
+     * vanished from a load order the customer thought they were editing, and the
+     * first symptom is a server that will not start or that kicks everyone.
+     *
+     * So the write that can lose data goes last, and if it throws, the state
+     * left behind is the recoverable one.
+     */
+    private function setScope(string $entry, bool $toServerOnly): void
+    {
+        if (! $this->canEdit()) {
+            Notification::make()->title(trans('arma3-manager::strings.permission_denied'))->danger()->send();
+
+            return;
+        }
+
+        try {
+            $mods = app(ModService::class);
+            $server = $this->server();
+            $profile = $this->profile();
+
+            if ($mods->serverModVariables($profile) === []) {
+                Notification::make()
+                    ->title('This egg has no server-only mod list')
+                    ->body('The profile declares no -serverMod= variable, so there is nowhere to move it to.')
+                    ->danger()
+                    ->send();
+
+                return;
+            }
+
+            $source = $toServerOnly ? $mods->loadOrder($server, $profile) : $mods->serverLoadOrder($server, $profile);
+            $target = $toServerOnly ? $mods->serverLoadOrder($server, $profile) : $mods->loadOrder($server, $profile);
+
+            if (! $source->has($entry)) {
+                // Someone else moved it, or the page is showing a stale render.
+                Notification::make()->title('That mod is no longer in the list it was in')->warning()->send();
+
+                return;
+            }
+
+            // `add()` is already a no-op when the entry is present, so a mod
+            // that was deliberately in both lists keeps its position rather than
+            // being appended a second time.
+            $mods->saveLoadOrder($server, $profile, $target->add($entry), serverOnly: $toServerOnly);
+            $mods->saveLoadOrder($server, $profile, $source->remove($entry), serverOnly: ! $toServerOnly);
+
+            Activity::event('server:arma3.mod-scope')
+                ->property(['mod' => $entry, 'server_only' => $toServerOnly])
+                ->log();
+
+            Notification::make()
+                ->title($toServerOnly ? 'Now loaded server-side only' : 'Now loaded by clients too')
+                ->body('Arma reads its mod list at startup, so this takes effect the next time the server starts.')
+                ->success()
+                ->send();
+        } catch (Throwable $exception) {
+            report($exception);
+
+            Notification::make()->title('Could not change how this mod loads')->body($exception->getMessage())->danger()->send();
         }
     }
 }

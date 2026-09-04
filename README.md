@@ -13,7 +13,7 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 360 passing
+`use` resolves against a real panel's autoloader, and the parsers have 361 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
@@ -26,7 +26,7 @@ with less to show.
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
 | Egg coverage screen — what every egg resolves to, and why | built |
-| Mods — load order, position, add/remove, live download progress | built |
+| Mods — load order, position, add/remove, client vs server-only, live download progress | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
@@ -88,6 +88,42 @@ Two things follow. Mod names on screen are resolved from the Steam API and cache
 tables show "ACE3" rather than a column of numbers, degrading to the id if Steam is
 unreachable. And "is it downloaded?" is now exact rather than a name match: SteamCMD writes
 into `Steam/steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
+
+### Client mods and server-only mods
+
+There are two load orders, not one, and the Mods page shows both in a single table with a
+**Loaded by** column saying which is which:
+
+| List | Egg variable | Arma flag | Who loads it |
+|---|---|---|---|
+| Client + server | `MODIFICATIONS` | `-mod=` | The server **and** every connecting client |
+| Server only | `SERVERMODS` | `-serverMod=` | The server alone |
+
+**Make server-only** and **Load on clients too** move a mod between them, and the confirmation
+spells out the consequence, because the two directions are not mirror images of each other.
+
+`-serverMod=` mods are deliberately *not required of clients* — that is the entire point of the
+flag, and it is correct for admin tools, logging, anti-cheat and server-side scripts. It is
+wrong for anything that adds **content**. Move a map or a weapons pack there and the server
+loads it while nobody else does; with `verifySignatures` on, every player is kicked for a
+missing addon. That failure names an addon class rather than a mod, so it is genuinely hard to
+trace back to a switch someone flipped on this page.
+
+The switch is two writes to two separate variables with no transaction across them, so it
+**adds to the destination first and removes from the source second**. A failure then leaves the
+mod in both lists — legal, visible here as two rows, and fixed by pressing the button again —
+rather than in neither, which is a mod that silently vanished from a load order the customer
+thought they were editing.
+
+The action is hidden entirely on a profile with no `-serverMod=` variable. A headless client
+joins a mission and hosts nothing, so the concept does not apply and the button could only ever
+produce an error naming a variable the customer cannot add.
+
+A mod may legally sit in **both** lists, which is why the table keys its rows by list and every
+row action is told which list it came from. Searching for the entry by name instead is how
+Remove on a server-only row used to delete the client entry, and how the reorder arrows on a
+server-only row used to do nothing at all — both silently. `PageHooksTest` fails the build if a
+row action stops passing its scope.
 
 ### Watching the download
 
