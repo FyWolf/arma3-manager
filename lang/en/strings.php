@@ -9,7 +9,6 @@ return [
         'configs' => 'Configuration',
         'presets' => 'Presets',
         'parameters' => 'Parameters',
-        'modsets' => 'Mod sets',
     ],
 
     'profile' => [

@@ -67,7 +67,6 @@ enum ServerFlavour: string implements HasLabel
                 Capability::Configs->value,
                 Capability::Presets->value,
                 Capability::Parameters->value,
-                Capability::ModSets->value,
             ]
             : [
                 Capability::Mods->value,

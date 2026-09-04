@@ -100,11 +100,6 @@ return [
         // file write and removes an entire class of "it did nothing".
         'manifest_path' => env('A3M_MANIFEST_PATH', 'arma3-manager.mods'),
 
-        // Whether changing the mod list may trigger a panel reinstall. Off by
-        // default: a reinstall is destructive on some eggs, and an operator
-        // should opt in per install rather than discover it.
-        'reinstall_on_sync' => (bool) env('A3M_REINSTALL_ON_SYNC', false),
-
         /*
         | Where SteamCMD leaves Workshop items, relative to the server root.
         |
@@ -223,8 +218,7 @@ return [
     | mapping. Heuristic results are deliberately never persisted — writing rows
     | behind the admin's back would fight them the next time they edit one.
     |
-    | capabilities: mods, servermods, missions, configs, presets, parameters,
-    |               modsets
+    | capabilities: mods, servermods, missions, configs, presets, parameters
     | mods_dir:     where @Mod folders live; null = no mod management at all
     | missions_dir: where .pbo missions live; null = no missions page
     | config_files: the files the Configuration page offers, in order
@@ -235,7 +229,7 @@ return [
         'arma3' => [
             'name' => 'Arma 3 Dedicated Server',
             'flavour' => 'arma3',
-            'capabilities' => ['mods', 'servermods', 'missions', 'configs', 'presets', 'parameters', 'modsets'],
+            'capabilities' => ['mods', 'servermods', 'missions', 'configs', 'presets', 'parameters'],
             'mods_dir' => 'mods',
             'servermods_dir' => 'servermods',
             'missions_dir' => 'mpmissions',
@@ -396,29 +390,6 @@ return [
         // Bytes. Wings streams the upload, but a mission larger than this is
         // almost always someone uploading the wrong file.
         'max_upload_bytes' => (int) env('A3M_MAX_MISSION_BYTES', 512 * 1024 * 1024),
-    ],
-
-    /*
-    |---------------------------------------------------------------------------
-    | Mod sets
-    |---------------------------------------------------------------------------
-    |
-    | The admin-curated catalogue: a named collection of workshop ids a customer
-    | can install in one action, optionally granted per server by the billing
-    | service through this plugin's API.
-    |
-    */
-
-    'modsets' => [
-        // A mod set install resolves dependencies and rewrites the load order,
-        // which on a large set is minutes of work. On the default queue that
-        // blocks every other panel job — backups, webhooks, SFTP revocation.
-        'queue' => env('A3M_MODSETS_QUEUE', 'default'),
-
-        // An install that has not moved in this long is presumed dead and is
-        // reaped, so a worker restarted mid-install cannot lock a server out of
-        // further installs forever.
-        'stale_after_minutes' => (int) env('A3M_STALE_INSTALL_MINUTES', 60),
     ],
 
     /*
