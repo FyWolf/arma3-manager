@@ -243,8 +243,36 @@ on the file would hide the button on a correctly configured server that has neve
 halfway goes stale and falls back to the disk rather than showing a mod downloading forever on a
 server that is otherwise running perfectly.
 
-The panel does not start the download itself — it has no Steam credentials, by design. On the
-stock egg the fetch happens the next time the server **starts**; nothing here needs a reinstall.
+#### When the server is stopped
+
+The daemon only exists while the server does, so there is no container to ask. **Download now**
+still works: it triggers Wings' `reinstall`, which is the one API that starts a container against
+a stopped server's volume. Wings' own comment on that function is the guarantee it rests on —
+*"This does not touch any existing files for the server, other than what the script modifies."*
+
+The egg's install script carries a mods-only fast path, so what actually runs is a mod download,
+not a reinstall. The game files are not touched and nothing is re-validated. The only visible
+difference is that the server shows as **Installing** while it happens.
+
+`canSyncWhileStopped()` detects this by looking for the fast path's marker in the egg's own
+`script_install`, because that is the thing that decides the outcome. A capability flag would be
+a second place for the truth to live, and the failure would be a twenty-gigabyte game
+re-validation on a server whose owner asked for one mod.
+
+Three things make it decline, and all three are normal rather than errors — the request is
+already written, so the mods still arrive at the next start:
+
+- the server is **running** (the daemon has it already),
+- the egg has **no fast path** (a stock egg would do a full reinstall),
+- the subuser lacks **`settings.reinstall`** — this starts a container and takes the server to
+  Installing, which someone trusted to edit a mod list is not automatically trusted with.
+
+It also refuses unless the server is genuinely `Offline`. Wings would otherwise **stop a running
+server** to do it, turning "download in the background" into an unannounced shutdown — the exact
+opposite of the feature.
+
+The panel does not download anything itself — it has no Steam credentials, by design. On the
+stock egg the fetch happens the next time the server **starts**.
 
 On the arma3-manager egg, `A3M_SYNC_ONLY=1` makes a start download everything and then exit
 without launching the game, so a large set can be fetched ahead of a session. That is as close
@@ -527,6 +555,7 @@ permission types are introduced.
 | Delete a mission | `file.delete` |
 | Reinstall a mod (delete its files and SteamCMD's record) | `file.delete` + `file.update` |
 | Ask for a background download | `startup.update` + `file.update` |
+| Have that run while the server is stopped | also `settings.reinstall` |
 | See startup parameters | `startup.read` |
 | Change startup parameters | `startup.update` |
 
