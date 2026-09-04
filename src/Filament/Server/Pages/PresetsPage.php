@@ -337,7 +337,7 @@ class PresetsPage extends Page implements HasTable
                     $added . ' mod(s) now in the load order.'
                     . ($unknown > 0 ? " {$unknown} item(s) could not be resolved on Steam and were skipped." : '')
                     . ($preset->dlc !== [] ? ' ' . count($preset->dlc) . ' Creator DLC in the preset were not imported — enable those on the Parameters page.' : '')
-                    . ' The files still need downloading: reinstall the server so SteamCMD fetches them.'
+                    . ' Start the server to fetch them — the Mods page shows each one arriving.'
                 ))
                 ->success()
                 ->send();

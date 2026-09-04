@@ -173,12 +173,81 @@ class ModService
      */
     public function downloadedIds(Server $server, ResolvedProfile $profile): array
     {
+        return $this->workshopIdsIn($server, 'steamapps/workshop/content/');
+    }
+
+    /**
+     * Workshop ids SteamCMD is fetching right now.
+     *
+     * ## Where the three states come from
+     *
+     * SteamCMD stages an item in `steamapps/workshop/downloads/<app>/<id>` while
+     * it is transferring, then **moves** it into `content/<app>/<id>` when the
+     * item is complete. Those are two different directories on disk, so the
+     * distinction is real rather than inferred:
+     *
+     *   in `downloads/` .. downloading now
+     *   in `content/` ... finished
+     *   in neither ..... queued, not started
+     *
+     * That is the whole progress display, and it costs two directory listings.
+     * It is also the only honest granularity available: SteamCMD's own transfer
+     * output never reaches the panel, so a percentage *within* one item cannot
+     * be shown. A 10 GB mod therefore sits on "downloading" for a long time and
+     * then completes, which is worth saying on screen rather than faking with a
+     * bar that moves.
+     *
+     * @return array<int, string>
+     */
+    public function downloadingIds(Server $server, ResolvedProfile $profile): array
+    {
+        return $this->workshopIdsIn($server, 'steamapps/workshop/downloads/');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function workshopIdsIn(Server $server, string $prefix): array
+    {
         $appId = (int) config('arma3-manager.workshop.app_id', 107410);
 
         return array_values(array_filter(
-            $this->listDirectories($server, 'steamapps/workshop/content/' . $appId),
+            $this->listDirectories($server, $prefix . $appId),
             WorkshopId::isValid(...),
         ));
+    }
+
+    /**
+     * A count of each state across the whole load order.
+     *
+     * Read once per render and handed to the table, so a ninety-mod list is two
+     * directory listings rather than two per row.
+     *
+     * @return array{total: int, downloaded: int, downloading: int, waiting: int}
+     */
+    public function downloadProgress(Server $server, ResolvedProfile $profile): array
+    {
+        $wanted = $this->loadOrder($server, $profile)->all();
+        $downloaded = $this->downloadedIds($server, $profile);
+        $downloading = $this->downloadingIds($server, $profile);
+
+        $done = 0;
+        $active = 0;
+
+        foreach ($wanted as $id) {
+            if (in_array($id, $downloaded, true)) {
+                $done++;
+            } elseif (in_array($id, $downloading, true)) {
+                $active++;
+            }
+        }
+
+        return [
+            'total' => count($wanted),
+            'downloaded' => $done,
+            'downloading' => $active,
+            'waiting' => max(0, count($wanted) - $done - $active),
+        ];
     }
 
     /**

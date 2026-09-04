@@ -21,7 +21,7 @@ Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind 
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
 | Egg coverage screen — what every egg resolves to, and why | built |
-| Mods — load order, position, add/remove, on-disk reconciliation | built |
+| Mods — load order, position, add/remove, live download progress | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
@@ -69,6 +69,24 @@ Two things follow. Mod names on screen are resolved from the Steam API and cache
 tables show "ACE3" rather than a column of numbers, degrading to the id if Steam is
 unreachable. And "is it downloaded?" is now exact rather than a name match: SteamCMD writes
 into `steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
+
+### Watching the download
+
+The Mods page polls every five seconds and shows each mod as **Downloaded**, **Downloading**
+or **Waiting**, with a running count above the table.
+
+Those three states are real rather than inferred. SteamCMD stages an item in
+`steamapps/workshop/downloads/<app>/<id>` while it transfers and **moves** it into
+`content/<app>/<id>` when it completes, so two directory listings answer the question exactly.
+Both are memoised per request, so a ninety-mod list costs two listings a tick, not two per row.
+
+What it cannot show is a percentage *within* one mod: SteamCMD's transfer output never reaches
+the panel. A 10 GB mod therefore sits on "Downloading" for a long time and then completes.
+That is said on the row's tooltip rather than papered over with a bar that moves smoothly and
+means nothing.
+
+The panel does not start the download — it has no Steam credentials, by design. The egg fetches
+what is listed the next time the server **starts**; nothing here needs a reinstall.
 
 Creator DLC are deliberately **not** in that list. They are owned rather than downloaded and
 their short codes (`gm`, `vn`) are not ids, so the Parameters page records them in the

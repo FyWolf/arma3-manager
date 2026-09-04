@@ -44,7 +44,7 @@ use Livewire\Attributes\Url;
  * Arma 3 Workshop items cannot be fetched by an anonymous SteamCMD login, and
  * this panel deliberately holds no Steam credentials. Adding a mod writes it
  * into the load order and the manifest; the customer's own container fetches it
- * on the next reinstall, using the Steam account already on its egg. The
+ * the next time it starts, using the Steam account already on its egg. The
  * confirmation says so, because "Added" without that sentence reads as "the
  * files are here now" and they are not.
  */
@@ -325,7 +325,7 @@ class WorkshopPage extends Page implements HasTable
 
             Notification::make()
                 ->title($added === 0 ? 'Already in the load order' : $added . ' mod(s) added')
-                ->body('The files are not downloaded yet — reinstall the server so SteamCMD fetches them with your Steam account.'
+                ->body('The files are not downloaded yet. Start the server and the egg fetches them with your own Steam account — the Mods page shows each one arriving.'
                     . ($skipped === [] ? '' : ' Skipped ' . count($skipped) . ' item(s) removed from the Workshop.'))
                 ->success()
                 ->send();
