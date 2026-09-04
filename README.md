@@ -25,7 +25,7 @@ Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind 
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
-| Presets — Launcher HTML upload (validated) and export | built |
+| Presets — saved per server, switchable, HTML upload and export | built |
 | Parameters — startup flags, headless clients, Creator DLC | built |
 | Mod sets — curated catalogue, queued install, billing grants | built |
 
@@ -122,6 +122,7 @@ php tests/LauncherPresetTest.php                  # 104 preset/id/entry assertio
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
 php tests/PageHooksTest.php                       # page conventions: headers, uploads, mod ids
+php artisan arma3-manager:diagnose <server>        # what the plugin resolves, step by step
 php tests/verify-imports.php   /path/to/panel     # every `use` resolves
 php tests/verify-overrides.php /path/to/panel     # no narrowed inherited methods
 ```
@@ -181,6 +182,28 @@ Note the loop that isn't: the bot's own bump commit pushes to `main`, but pushes
 token is ever swapped for a PAT.
 
 ---
+
+## When mods do not appear
+
+`php artisan arma3-manager:diagnose <server>` prints the whole chain in one go: which capability
+profile resolved and how, which variable names the profile looks for, which the egg actually
+declares, which one matched, its raw value, what parsed out of it, and what is on disk.
+
+That chain has failed at four different points so far, and each time the layer above reported
+success — an egg with no profile, a variable name the egg does not declare, a value in a format
+the egg cannot read, and a value that parsed to nothing. Guessing which one it is has been
+wrong more often than right, so the command exists to stop guessing. It is read-only and never
+prints credentials; the Steam account lives in variables this never touches.
+
+## Presets are saved per server
+
+Importing keeps the preset, so a unit that plays two campaigns can hold both and switch. The
+Presets page lists what is saved, and **Make active** writes one over the load order.
+
+Whether a preset is "Active" is decided by comparing its entries against the current load order,
+not by a stored flag. The customer can edit mods afterwards, and a flag would go on claiming the
+preset is running while the server loads something else — the screen and the server disagreeing
+silently is the exact class of bug this plugin keeps turning up.
 
 ## Uploading a launcher preset
 
