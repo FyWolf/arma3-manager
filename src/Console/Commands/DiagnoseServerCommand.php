@@ -2,6 +2,7 @@
 
 namespace FyWolf\Arma3Manager\Console\Commands;
 
+use App\Models\EggVariable;
 use App\Models\Server;
 use App\Models\ServerVariable;
 use FyWolf\Arma3Manager\Enums\Capability;
@@ -111,17 +112,7 @@ class DiagnoseServerCommand extends Command
         // visible rather than inferred. This is the step that has been wrong
         // before: writing to a variable the egg does not read fails in total
         // silence.
-        $server->loadMissing('variables');
-
-        $declared = [];
-
-        foreach ($server->variables as $variable) {
-            $declared[] = (string) $variable->env_variable;
-        }
-
-        sort($declared);
-
-        $this->line('  egg declares ' . (implode(', ', $declared) ?: '(none)'));
+        $this->line('  egg declares ' . (implode(', ', ServerVariables::declared($server)) ?: '(none)'));
 
         $resolved = $mods->variableName($server, $profile);
 
@@ -134,15 +125,9 @@ class DiagnoseServerCommand extends Command
 
         $this->line('  MATCHED      ' . $resolved);
 
-        $raw = null;
+        $raw = ServerVariables::read($server, $candidates);
 
-        foreach ($server->variables as $variable) {
-            if (strtoupper((string) $variable->env_variable) === strtoupper($resolved)) {
-                $raw = $variable->server_value;
-            }
-        }
-
-        $this->line('  raw value    ' . ($raw === null ? '(null — no server_variables row)' : ($raw === '' ? '(empty string)' : $raw)));
+        $this->line('  raw value    ' . $this->display($resolved, (string) $raw));
 
         $order = $mods->loadOrder($server, $profile);
 
@@ -189,9 +174,7 @@ class DiagnoseServerCommand extends Command
         $resolved = $mods->variableName($server, $profile);
         $target = null;
 
-        $server->loadMissing('variables');
-
-        foreach ($server->variables as $variable) {
+        foreach (EggVariable::query()->where('egg_id', $server->egg_id)->get() as $variable) {
             if ($resolved !== null && strtoupper((string) $variable->env_variable) === strtoupper($resolved)) {
                 $target = $variable;
             }
@@ -214,11 +197,11 @@ class DiagnoseServerCommand extends Command
 
         $this->line('  total rows      ' . $rows->count() . ' for this server');
 
-        $names = [];
-
-        foreach ($server->variables as $variable) {
-            $names[$variable->id] = (string) $variable->env_variable;
-        }
+        $names = EggVariable::query()
+            ->where('egg_id', $server->egg_id)
+            ->pluck('env_variable', 'id')
+            ->map(static fn ($name): string => (string) $name)
+            ->all();
 
         $this->line('  (values are masked unless this plugin manages that variable)');
 
@@ -257,10 +240,10 @@ class DiagnoseServerCommand extends Command
             return;
         }
 
-        // A completely fresh model, so nothing can be answered from a relation
-        // loaded earlier in this process.
-        $reloaded = Server::query()->with('variables')->find($server->id);
-        $after = $reloaded ? ServerVariables::read($reloaded, $candidates) : null;
+        // Reads go to the tables now, so this needs no relation at all — and
+        // eager loading one here is precisely what made the previous version of
+        // this test report "the write did NOT persist" about a write that had.
+        $after = ServerVariables::read($server, $candidates);
 
         $this->line('  read back     ' . ($after === null ? '(no row)' : ($after === '' ? '(empty)' : $after)));
 
@@ -272,15 +255,10 @@ class DiagnoseServerCommand extends Command
 
         // Put it back exactly as it was.
         if ($before === null) {
-            $target = null;
-
-            foreach ($server->variables as $variable) {
-                if (in_array(strtoupper((string) $variable->env_variable), array_map('strtoupper', $candidates), true)) {
-                    $target = $variable;
-
-                    break;
-                }
-            }
+            $target = EggVariable::query()
+                ->where('egg_id', $server->egg_id)
+                ->whereIn('env_variable', $candidates)
+                ->first();
 
             if ($target) {
                 ServerVariable::query()
@@ -310,8 +288,18 @@ class DiagnoseServerCommand extends Command
             return;
         }
 
-        $this->line('  downloaded   ' . count($downloaded) . ' workshop item(s) in steamapps/workshop/content');
-        $this->line('  downloading  ' . count($downloading) . ' in steamapps/workshop/downloads');
+        $root = $mods->resolvedWorkshopRoot($server);
+
+        if ($root === null) {
+            $this->line('  workshop dir (none of ' . implode(', ', (array) config('arma3-manager.steamcmd.workshop_roots', [])) . ' answered)');
+            $this->line('               Nothing has been downloaded yet, or the server is off and the');
+            $this->line('               daemon is refusing listings. Every mod will read as "waiting".');
+        } else {
+            $this->line('  workshop dir ' . $root);
+        }
+
+        $this->line('  downloaded   ' . count($downloaded) . ' workshop item(s) (SteamCMD cache or @<id> folder)');
+        $this->line('  downloading  ' . count($downloading) . ' staged in ' . ($root ?? '?') . '/downloads');
 
         $missing = $mods->missing($server, $profile);
 
@@ -388,11 +376,16 @@ class DiagnoseServerCommand extends Command
         $identifier = trim($identifier);
 
         return Server::query()
-            ->with(['egg', 'variables'])
+            // Deliberately NOT eager loading `variables`: that relation's
+            // join reads `$this->id`, which is null during eager loading,
+            // so every `server_value` comes back null. Eager loading it is
+            // what made this command report "no server_variables row" on a
+            // server whose row it then printed in full a few lines later.
+            ->with('egg')
             ->where('uuid', $identifier)
             ->orWhere('uuid_short', $identifier)
             ->orWhere('name', $identifier)
             ->first()
-            ?? Server::query()->with(['egg', 'variables'])->where('name', 'like', '%' . $identifier . '%')->first();
+            ?? Server::query()->with('egg')->where('name', 'like', '%' . $identifier . '%')->first();
     }
 }

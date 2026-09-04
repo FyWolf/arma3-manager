@@ -104,6 +104,36 @@ return [
         // default: a reinstall is destructive on some eggs, and an operator
         // should opt in per install rather than discover it.
         'reinstall_on_sync' => (bool) env('A3M_REINSTALL_ON_SYNC', false),
+
+        /*
+        | Where SteamCMD leaves Workshop items, relative to the server root.
+        |
+        | Ordered candidates, first one that exists wins — and the order is not
+        | cosmetic. `Steam/steamapps/workshop` is the real answer for the stock
+        | Arma 3 image and the one that was missing: the entrypoint declares
+        |
+        |     WORKSHOP_DIR="./Steam/steamapps/workshop"
+        |
+        | because `workshop_download_item` runs *without* `+force_install_dir`,
+        | so SteamCMD falls back to its own default of `$HOME/Steam` — and HOME
+        | is the server root. Only the *game* is installed to the root, by the
+        | install script's `+force_install_dir /mnt/server`.
+        |
+        | `steamapps/workshop` (no `Steam/`) is kept second for eggs that do
+        | force the install dir for mods too. It is what this plugin looked in
+        | exclusively, and it does not exist on the stock image — which is why
+        | every mod read as "Waiting" forever and the page reported the whole
+        | load order missing. `listDirectories()` swallows the 404, so there was
+        | no error anywhere: exactly the silent failure this codebase keeps
+        | finding.
+        */
+        'workshop_roots' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env(
+                'A3M_WORKSHOP_ROOTS',
+                'Steam/steamapps/workshop,steamapps/workshop',
+            )),
+        ))),
     ],
 
     'http' => [

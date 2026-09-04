@@ -188,6 +188,108 @@ foreach ($guesses as $guess) {
     echo "       $guess\n";
 }
 
+// ---------------------------------------------------------------------------
+// Nothing may read a server variable through the Server::variables relation.
+// ---------------------------------------------------------------------------
+//
+// The panel's `Server::variables()` is a hasMany over `egg_variables` with a
+// left join onto `server_variables`, constrained inside a closure that reads
+// `$this->id`. Under lazy loading that is the real model. Under **eager**
+// loading Laravel builds the relation with
+// `Relation::noConstraints(fn () => $model->newInstance()->$name())` — a fresh,
+// attribute-less instance — so `$this->id` is null, the join matches nothing,
+// and `server_value` is null for every variable on the server.
+//
+// This plugin called `loadMissing('variables')` and then read `server_value`,
+// so every read returned "unset" no matter what was stored. The write was
+// unaffected, because it only needs `egg_variables.id`. The result: the panel
+// showed ninety mods, the database held them, and every page here showed an
+// empty list — through six rounds of diagnosis, including one where this
+// plugin's own diagnostic command reported "no server_variables row" and then
+// printed that row in full a few lines later.
+//
+// `ServerVariables` goes to the tables directly. Nothing else should reach for
+// the relation, and `server_value` is the tell because it exists nowhere else.
+
+$eager = [];
+
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(dirname(__DIR__) . '/src')) as $file) {
+    if ($file->getExtension() !== 'php') {
+        continue;
+    }
+
+    $name = $file->getBasename('.php');
+
+    // ServerVariables is the one place allowed to discuss any of this, and it
+    // only does so in prose.
+    if ($name === 'ServerVariables') {
+        continue;
+    }
+
+    // Comments explain the trap on purpose; only code counts.
+    $source = file_get_contents($file->getPathname());
+    $source = preg_replace('#/\*.*?\*/#s', '', $source) ?? $source;
+    $source = preg_replace('#//[^\n]*#', '', $source) ?? $source;
+
+    if (str_contains($source, 'server_value')) {
+        $eager[] = "$name reads ->server_value, which is null whenever the relation was eager loaded. Use ServerVariables::read().";
+    }
+
+    if (preg_match("/loadMissing\(\s*'variables'\s*\)/", $source) === 1) {
+        $eager[] = "$name calls loadMissing('variables'), which eager loads and makes every server_value null. Use ServerVariables.";
+    }
+}
+
+echo "\nServer variables:\n";
+check('nothing reads a server variable through the relation', $eager, []);
+
+foreach ($eager as $offender) {
+    echo "       $offender\n";
+}
+
+// ---------------------------------------------------------------------------
+// The workshop directory is resolved, never hardcoded without `Steam/`.
+// ---------------------------------------------------------------------------
+//
+// SteamCMD runs `+workshop_download_item` with no `+force_install_dir`, so it
+// falls back to `$HOME/Steam` — and HOME is the server root. Items therefore
+// land in `Steam/steamapps/workshop/content/<app>/<id>`. Only the *game* is in
+// the root, installed with an explicit `+force_install_dir`.
+//
+// This plugin looked in `steamapps/workshop` for its whole life. That directory
+// does not exist on the stock image, `listDirectories()` catches the 404 and
+// returns an empty array, and so every mod read as "Waiting" forever while the
+// download was in fact working. Nothing logged an error.
+//
+// A bare `steamapps/workshop` literal is therefore always the bug, and the
+// prefixed form is deliberately not matched here.
+
+$paths = [];
+
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(dirname(__DIR__) . '/src')) as $file) {
+    if ($file->isDir() || $file->getExtension() !== 'php') {
+        continue;
+    }
+
+    $name = $file->getBasename();
+    $source = file_get_contents($file->getPathname());
+
+    // Comments explain the bug by name, so they must not count as one.
+    $source = preg_replace('#/\*.*?\*/#s', '', $source) ?? $source;
+    $source = preg_replace('#//[^\n]*#', '', $source) ?? $source;
+
+    if (preg_match('#[\'"]steamapps/workshop#', $source) === 1) {
+        $paths[] = "$name hardcodes 'steamapps/workshop', which does not exist on the stock image — mods are in 'Steam/steamapps/workshop'. Resolve it with ModService::workshopRoot() instead.";
+    }
+}
+
+echo "\nWorkshop directory:\n";
+check('no file hardcodes the pre-Steam/ workshop path', $paths, []);
+
+foreach ($paths as $offender) {
+    echo "       $offender\n";
+}
+
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "Checked $checked page class(es).\n";
 echo "$pass passed, $fail failed\n";
