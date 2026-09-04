@@ -13,20 +13,20 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 397 passing
+`use` resolves against a real panel's autoloader, and the parsers have 402 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
 The download reporting has a companion egg,
 [`arma3-manager-egg`](https://github.com/FyWolf/arma3-manager-egg), which makes per-mod
-percentages and failure reasons possible. It is optional; everything works on the stock egg
-with less to show.
+percentages, failure reasons and **downloading mods while the server runs** possible. It is
+optional; everything works on the stock egg with less to show and no background download.
 
 | Feature | State |
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
 | Egg coverage screen — what every egg resolves to, and why | built |
-| Mods — load order, position, add/remove, client vs server-only, reinstall, live download progress | built |
+| Mods — load order, position, add/remove, client vs server-only, reinstall, background download, live progress | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
@@ -212,8 +212,67 @@ to `.arma3-manager/wanted.json` on every save, because the sizes live behind the
 and the container has no credentials but the customer's own. Without that file the egg still
 reports state; there is simply no percentage.
 
-The panel does not start the download — it has no Steam credentials, by design. The egg fetches
-what is listed the next time the server **starts**; nothing here needs a reinstall.
+### Downloading in the background
+
+On the [arma3-manager egg](https://github.com/FyWolf/arma3-manager-egg), **Download now** fetches
+everything missing from the load order **while the server keeps running**. Nobody is
+disconnected and nothing restarts.
+
+It works by writing `.arma3-manager/request.json`, which a daemon inside the container picks up
+within seconds. The panel still transfers nothing and still holds no Steam credentials — it asks,
+and the container's own Steam account does the work.
+
+**The ids are always named in the request.** The daemon can fall back to the load order it booted
+with, and that fallback is a trap: `MODIFICATIONS` is read once, at container start, so it is
+stale the moment the load order is edited here. A request relying on it would quietly fetch the
+*previous* mod list, which is exactly the kind of silent, plausible-looking wrong answer this
+codebase keeps turning up.
+
+**Mods are still activated by a restart.** Arma reads its mod list once, at startup, and nothing
+can change that — so the download is what becomes asynchronous, not the loading. The gain is
+real anyway: the restart is then as fast as one with no mod changes at all, instead of being
+however long a 40 GB download takes.
+
+The button is hidden on the stock egg, because nothing there watches for the request and it would
+otherwise write a file into a directory nobody reads and report success. Availability is detected
+from the egg declaring `A3M_BACKGROUND_SYNC`, not from `status.json` existing — the variable says
+the egg *has* the daemon, the file only says a container has already booted with it, and gating
+on the file would hide the button on a correctly configured server that has never been started.
+
+`DownloadStatus` treats `syncing` as a live phase alongside `mods`, so a background sync killed
+halfway goes stale and falls back to the disk rather than showing a mod downloading forever on a
+server that is otherwise running perfectly.
+
+#### When the server is stopped
+
+The daemon only exists while the server does, so there is no container to ask. **Download now**
+still works: it triggers Wings' `reinstall`, which is the one API that starts a container against
+a stopped server's volume. Wings' own comment on that function is the guarantee it rests on —
+*"This does not touch any existing files for the server, other than what the script modifies."*
+
+The egg's install script carries a mods-only fast path, so what actually runs is a mod download,
+not a reinstall. The game files are not touched and nothing is re-validated. The only visible
+difference is that the server shows as **Installing** while it happens.
+
+`canSyncWhileStopped()` detects this by looking for the fast path's marker in the egg's own
+`script_install`, because that is the thing that decides the outcome. A capability flag would be
+a second place for the truth to live, and the failure would be a twenty-gigabyte game
+re-validation on a server whose owner asked for one mod.
+
+Three things make it decline, and all three are normal rather than errors — the request is
+already written, so the mods still arrive at the next start:
+
+- the server is **running** (the daemon has it already),
+- the egg has **no fast path** (a stock egg would do a full reinstall),
+- the subuser lacks **`settings.reinstall`** — this starts a container and takes the server to
+  Installing, which someone trusted to edit a mod list is not automatically trusted with.
+
+It also refuses unless the server is genuinely `Offline`. Wings would otherwise **stop a running
+server** to do it, turning "download in the background" into an unannounced shutdown — the exact
+opposite of the feature.
+
+The panel does not download anything itself — it has no Steam credentials, by design. On the
+stock egg the fetch happens the next time the server **starts**.
 
 On the arma3-manager egg, `A3M_SYNC_ONLY=1` makes a start download everything and then exit
 without launching the game, so a large set can be fetched ahead of a session. That is as close
@@ -238,7 +297,7 @@ Nine checks, seven of which need no panel at all:
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 73 load-order assertions
 php tests/LauncherPresetTest.php                  # 106 preset/id/entry assertions
-php tests/DownloadStatusTest.php                  # 49 status.json parsing assertions
+php tests/DownloadStatusTest.php                  # 54 status.json parsing assertions
 php tests/SteamAcfTest.php                        # 36 ACF edit/refusal assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
@@ -495,6 +554,8 @@ permission types are introduced.
 | Schedule or unschedule a mission | `file.update` |
 | Delete a mission | `file.delete` |
 | Reinstall a mod (delete its files and SteamCMD's record) | `file.delete` + `file.update` |
+| Ask for a background download | `startup.update` + `file.update` |
+| Have that run while the server is stopped | also `settings.reinstall` |
 | See startup parameters | `startup.read` |
 | Change startup parameters | `startup.update` |
 

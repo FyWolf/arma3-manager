@@ -110,12 +110,26 @@ final class DownloadStatus
      */
     public function isStale(): bool
     {
-        if ($this->phase !== 'mods') {
+        // `mods` is a boot-time download, `syncing` is the background daemon.
+        // Both are rewritten every few seconds while they run, and both leave a
+        // file claiming work is in progress if the container dies — so both can
+        // go stale. Missing `syncing` here would have been the subtler bug: a
+        // background sync killed halfway would show a mod downloading forever,
+        // on a server that is otherwise running perfectly.
+        if (! in_array($this->phase, ['mods', 'syncing'], true)) {
             return false;
         }
 
         return $this->updatedAt <= 0
             || (time() - $this->updatedAt) > self::STALE_AFTER_SECONDS;
+    }
+
+    /**
+     * Whether a background sync is running right now.
+     */
+    public function isSyncing(): bool
+    {
+        return $this->phase === 'syncing' && ! $this->isStale();
     }
 
     /**

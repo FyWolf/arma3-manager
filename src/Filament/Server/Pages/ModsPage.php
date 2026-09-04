@@ -2,10 +2,12 @@
 
 namespace FyWolf\Arma3Manager\Filament\Server\Pages;
 
+use App\Enums\ContainerStatus;
 use App\Enums\SubuserPermission;
 use App\Facades\Activity;
 use App\Filament\Server\Resources\Files\Pages\ListFiles;
 use App\Models\Server;
+use App\Services\Servers\ReinstallServerService;
 use App\Traits\Filament\BlockAccessInConflict;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
@@ -460,6 +462,60 @@ class ModsPage extends Page implements HasTable
     }
 
     /**
+     * When the server is stopped, run the download in an installer container.
+     *
+     * The sync daemon only exists while the server does. With the server off
+     * there is no container at all, so a request would simply wait for the next
+     * start — which is the thing the customer was trying to avoid.
+     *
+     * Wings' `reinstall` is the only API that starts a container against a
+     * stopped server's volume, and the egg's install script carries a fast path
+     * that fetches the pending request and exits without touching the game
+     * files. So this is a download, not a reinstall, however it is labelled.
+     *
+     * Returns whether one was started. Every reason not to is a normal outcome
+     * rather than an error: the server is running (the daemon has it), the egg
+     * has no fast path (the request waits for the next start), or the subuser
+     * cannot reinstall (likewise). In all three the request is already written
+     * and the mods still arrive.
+     */
+    private function startStoppedSync(): bool
+    {
+        $server = $this->server();
+
+        if (! app(ModService::class)->canSyncWhileStopped($server)) {
+            return false;
+        }
+
+        // `settings.reinstall` and not merely the mod permissions: this starts a
+        // container and takes the server to Installing. A subuser trusted to
+        // edit a mod list is not automatically trusted with that.
+        if (! (user()?->can(SubuserPermission::SettingsReinstall, $server) ?? false)) {
+            return false;
+        }
+
+        try {
+            // Only when genuinely off. Wings would otherwise stop a running
+            // server to do it, which turns "download in the background" into an
+            // unannounced shutdown — the exact opposite of the feature.
+            if ($server->retrieveStatus() !== ContainerStatus::Offline) {
+                return false;
+            }
+
+            app(ReinstallServerService::class)->handle($server);
+
+            return true;
+        } catch (Throwable $exception) {
+            // The request file is already written, so the worst case is that the
+            // download waits for the next start. That is not worth failing the
+            // action the customer actually asked for.
+            report($exception);
+
+            return false;
+        }
+    }
+
+    /**
      * Reinstalling deletes files and rewrites SteamCMD's record.
      *
      * File permissions, not `startup.update`: this changes nothing about the
@@ -526,6 +582,65 @@ class ModsPage extends Page implements HasTable
                         report($exception);
 
                         Notification::make()->title('Could not write the mod list')->body($exception->getMessage())->danger()->send();
+                    }
+                }),
+
+            Action::make('download')
+                ->label('Download now')
+                ->icon('tabler-cloud-download')
+                ->color('success')
+                // Only on an egg that carries the sync daemon. On the stock egg
+                // there is nothing watching for the request, so the button would
+                // write a file into a directory nobody reads and report success.
+                ->visible(fn (): bool => $this->canEdit()
+                    && app(ModService::class)->supportsBackgroundSync($this->server()))
+                ->requiresConfirmation()
+                ->modalHeading('Download the missing mods now')
+                ->modalDescription('Fetches everything in the load order that is not already on disk, in the background, while the server keeps running. Players are not disconnected and nothing restarts.
+
+The mods are *loaded* at the next restart — Arma reads its mod list once, at startup — but that restart is then instant instead of waiting for the download.
+
+If the server is stopped, this is picked up the next time it starts.')
+                ->modalSubmitActionLabel('Start downloading')
+                ->action(function (): void {
+                    try {
+                        $mods = app(ModService::class);
+                        $server = $this->server();
+                        $profile = $this->profile();
+
+                        $requested = $mods->requestSync($server, $profile);
+
+                        if ($requested === []) {
+                            Notification::make()
+                                ->title('Nothing to download')
+                                ->body('Every Workshop mod in the load order is already on disk.')
+                                ->success()
+                                ->send();
+
+                            return;
+                        }
+
+                        $started = $this->startStoppedSync();
+
+                        Activity::event('server:arma3.mod-download')
+                            ->property(['mods' => $requested, 'via_installer' => $started])
+                            ->log();
+
+                        Notification::make()
+                            ->title(count($requested) . ' mod(s) queued for download')
+                            ->body($started
+                                ? 'The server is stopped, so a temporary container has been started on its files to fetch them. The server shows as "Installing" until it finishes — nothing is being reinstalled, and the game files are not touched.'
+                                : 'The server picks this up within a few seconds and downloads in the background. This page shows each one arriving; you do not need to stay on it.')
+                            ->success()
+                            ->send();
+                    } catch (Throwable $exception) {
+                        report($exception);
+
+                        Notification::make()
+                            ->title('Could not ask for a download')
+                            ->body($exception->getMessage())
+                            ->danger()
+                            ->send();
                     }
                 }),
 
