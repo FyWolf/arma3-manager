@@ -2,7 +2,7 @@
   "id": "arma3-manager",
   "name": "Arma 3 Manager",
   "author": "FyWolf",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Workshop mods, load order, missions, presets and server configuration for Arma 3 servers, gated per egg.",
   "category": "plugin",
   "url": "https://github.com/HexalabsHosting/arma3-manager",
