@@ -3,11 +3,13 @@
 namespace FyWolf\Arma3Manager\Console\Commands;
 
 use App\Models\Server;
+use App\Models\ServerVariable;
 use FyWolf\Arma3Manager\Enums\Capability;
 use FyWolf\Arma3Manager\Services\ModService;
 use FyWolf\Arma3Manager\Support\CapabilityResolver;
 use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
+use FyWolf\Arma3Manager\Support\ServerVariables;
 use FyWolf\Arma3Manager\Support\WorkshopId;
 use Illuminate\Console\Command;
 use Throwable;
@@ -33,7 +35,9 @@ use Throwable;
  */
 class DiagnoseServerCommand extends Command
 {
-    protected $signature = 'arma3-manager:diagnose {server : The server uuid, short uuid, or name}';
+    protected $signature = 'arma3-manager:diagnose
+        {server : The server uuid, short uuid, or name}
+        {--test-write : Write a canary value to the mod list variable, read it back, then restore what was there}';
 
     protected $description = 'Show what Arma 3 Manager resolves for one server, step by step.';
 
@@ -73,6 +77,12 @@ class DiagnoseServerCommand extends Command
         )));
 
         $this->reportVariable($server, $profile, $mods);
+        $this->reportRows($server, $profile, $mods);
+
+        if ($this->option('test-write')) {
+            $this->testWrite($server, $profile, $mods);
+        }
+
         $this->reportDisk($server, $profile, $mods);
 
         $this->line('');
@@ -146,6 +156,137 @@ class DiagnoseServerCommand extends Command
 
         if ($order->isEmpty() && filled($raw)) {
             $this->error('  The variable holds a value but nothing parsed out of it. That is a format bug — please report this line.');
+        }
+    }
+
+    /**
+     * The `server_variables` table itself, queried directly.
+     *
+     * Everything else here reads through `$server->variables`, which is a
+     * *projection*: a hasMany over `egg_variables` with a left join onto
+     * `server_variables`. If a write lands somewhere that projection does not
+     * look — the wrong `variable_id`, a row against another server — the value
+     * is simply absent and every layer above reports success.
+     *
+     * That is the exact state this plugin is in on at least one panel: the write
+     * returns true, no exception is raised, and the read finds nothing. So this
+     * goes around the projection and prints the rows.
+     */
+    private function reportRows(Server $server, ResolvedProfile $profile, ModService $mods): void
+    {
+        $this->line('');
+        $this->info('server_variables rows');
+
+        $resolved = $mods->variableName($server, $profile);
+        $target = null;
+
+        $server->loadMissing('variables');
+
+        foreach ($server->variables as $variable) {
+            if ($resolved !== null && strtoupper((string) $variable->env_variable) === strtoupper($resolved)) {
+                $target = $variable;
+            }
+        }
+
+        if ($target !== null) {
+            $this->line('  would write to  egg_variables.id = ' . $target->id . '  (' . $target->env_variable . ')');
+
+            $direct = ServerVariable::query()
+                ->where('server_id', $server->id)
+                ->where('variable_id', $target->id)
+                ->first();
+
+            $this->line('  direct lookup   ' . ($direct
+                ? 'row id ' . $direct->id . ', value: ' . ($direct->variable_value === '' ? '(empty)' : $direct->variable_value)
+                : 'NO ROW for (server ' . $server->id . ', variable ' . $target->id . ')'));
+        }
+
+        $rows = ServerVariable::query()->where('server_id', $server->id)->get();
+
+        $this->line('  total rows      ' . $rows->count() . ' for this server');
+
+        $names = [];
+
+        foreach ($server->variables as $variable) {
+            $names[$variable->id] = (string) $variable->env_variable;
+        }
+
+        foreach ($rows as $row) {
+            $name = $names[$row->variable_id] ?? '(variable ' . $row->variable_id . ' is not on this egg)';
+            $value = (string) $row->variable_value;
+
+            $this->line(sprintf(
+                '    %-28s %s',
+                $name,
+                $value === '' ? '(empty)' : mb_strimwidth($value, 0, 60, '…'),
+            ));
+        }
+    }
+
+    /**
+     * Write a canary, read it back, put the old value back.
+     *
+     * The one thing no amount of reading the code has settled: whether a write
+     * to this variable persists at all. Opt-in, because it does mutate — and it
+     * restores whatever was there, including restoring "no row at all" by
+     * deleting the row it created.
+     */
+    private function testWrite(Server $server, ResolvedProfile $profile, ModService $mods): void
+    {
+        $this->line('');
+        $this->info('Write test');
+
+        $candidates = $mods->modVariables($profile);
+        $before = ServerVariables::read($server, $candidates);
+
+        $this->line('  before        ' . ($before === null ? '(no row)' : ($before === '' ? '(empty)' : $before)));
+
+        $canary = '@000000001;@000000002;';
+
+        $wrote = ServerVariables::write($server, $candidates, $canary);
+
+        $this->line('  write()       ' . ($wrote ? 'returned true' : 'returned FALSE — no candidate variable exists'));
+
+        if (! $wrote) {
+            return;
+        }
+
+        // A completely fresh model, so nothing can be answered from a relation
+        // loaded earlier in this process.
+        $reloaded = Server::query()->with('variables')->find($server->id);
+        $after = $reloaded ? ServerVariables::read($reloaded, $candidates) : null;
+
+        $this->line('  read back     ' . ($after === null ? '(no row)' : ($after === '' ? '(empty)' : $after)));
+
+        if ($after === $canary) {
+            $this->info('  RESULT        writes persist. The fault is elsewhere.');
+        } else {
+            $this->error('  RESULT        the write did NOT persist. This is the bug.');
+        }
+
+        // Put it back exactly as it was.
+        if ($before === null) {
+            $target = null;
+
+            foreach ($server->variables as $variable) {
+                if (in_array(strtoupper((string) $variable->env_variable), array_map('strtoupper', $candidates), true)) {
+                    $target = $variable;
+
+                    break;
+                }
+            }
+
+            if ($target) {
+                ServerVariable::query()
+                    ->where('server_id', $server->id)
+                    ->where('variable_id', $target->id)
+                    ->delete();
+            }
+
+            $this->line('  restored      removed the row again (there was none before)');
+        } else {
+            ServerVariables::write($server, $candidates, $before);
+            $this->line('  restored      previous value written back');
         }
     }
 

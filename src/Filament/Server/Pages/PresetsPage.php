@@ -146,6 +146,11 @@ class PresetsPage extends Page implements HasTable
                         'active' => $active,
                         'status' => match (true) {
                             $active => 'Active',
+                            // An empty load order after applying is not the
+                            // customer editing it — it is the write not having
+                            // landed, and saying "changed" sends them looking
+                            // for an edit they did not make.
+                            $preset->applied_at !== null && $order->isEmpty() => 'Applied, but nothing is loaded',
                             $preset->applied_at !== null => 'Applied, then changed',
                             default => 'Not applied',
                         },
@@ -173,6 +178,7 @@ class PresetsPage extends Page implements HasTable
                     ->color(fn (array $record): string => $record['status_color'])
                     ->tooltip(fn (array $record): string => match ($record['status']) {
                         'Active' => 'This preset is exactly what the server is set to load.',
+                        'Applied, but nothing is loaded' => 'This was applied ' . ($record['applied_at'] ?? 'earlier') . ' but the mod list on this server is empty, which means the write did not reach the egg. Run `php artisan arma3-manager:diagnose <server>` on the panel to see where the chain breaks.',
                         'Applied, then changed' => 'This was applied ' . ($record['applied_at'] ?? 'earlier') . ', and the load order has been edited since. Apply it again to go back to it.',
                         default => 'Saved but never applied. Applying it replaces the load order.',
                     }),
