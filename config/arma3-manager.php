@@ -127,6 +127,26 @@ return [
         | no error anywhere: exactly the silent failure this codebase keeps
         | finding.
         */
+        /*
+        | The two files exchanged with the arma3-manager egg.
+        |
+        | Both are optional in both directions, and that is the point: a server
+        | on the stock Arma 3 egg has neither, and every feature that reads them
+        | falls back to probing directories. Nothing here may become required, or
+        | the plugin stops working on the egg most people actually run.
+        |
+        |  - `status_path` is written by the egg and read here: per-mod state,
+        |    percentage, resolved name and — the one no directory listing can
+        |    ever provide — the reason a download failed.
+        |  - `wanted_path` is written here and read by the egg: the names and
+        |    expected sizes it needs to turn "bytes on disk" into a percentage.
+        |    The panel has the Steam Web API; the container deliberately has no
+        |    credentials beyond the server's own, so this is the only way those
+        |    sizes reach it.
+        */
+        'status_path' => env('A3M_STATUS_PATH', '.arma3-manager/status.json'),
+        'wanted_path' => env('A3M_WANTED_PATH', '.arma3-manager/wanted.json'),
+
         'workshop_roots' => array_values(array_filter(array_map(
             'trim',
             explode(',', (string) env(

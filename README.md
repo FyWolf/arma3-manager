@@ -13,15 +13,20 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 307 passing
+`use` resolves against a real panel's autoloader, and the parsers have 397 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
+
+The download reporting has a companion egg,
+[`arma3-manager-egg`](https://github.com/FyWolf/arma3-manager-egg), which makes per-mod
+percentages and failure reasons possible. It is optional; everything works on the stock egg
+with less to show.
 
 | Feature | State |
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
 | Egg coverage screen — what every egg resolves to, and why | built |
-| Mods — load order, position, add/remove, live download progress | built |
+| Mods — load order, position, add/remove, client vs server-only, reinstall, live download progress | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
@@ -82,7 +87,88 @@ fails the build if anything starts synthesising a folder name from a title again
 Two things follow. Mod names on screen are resolved from the Steam API and cached, so the
 tables show "ACE3" rather than a column of numbers, degrading to the id if Steam is
 unreachable. And "is it downloaded?" is now exact rather than a name match: SteamCMD writes
-into `steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
+into `Steam/steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
+
+### Client mods and server-only mods
+
+There are two load orders, not one, and the Mods page shows both in a single table with a
+**Loaded by** column saying which is which:
+
+| List | Egg variable | Arma flag | Who loads it |
+|---|---|---|---|
+| Client + server | `MODIFICATIONS` | `-mod=` | The server **and** every connecting client |
+| Server only | `SERVERMODS` | `-serverMod=` | The server alone |
+
+**Make server-only** and **Load on clients too** move a mod between them, and the confirmation
+spells out the consequence, because the two directions are not mirror images of each other.
+
+`-serverMod=` mods are deliberately *not required of clients* — that is the entire point of the
+flag, and it is correct for admin tools, logging, anti-cheat and server-side scripts. It is
+wrong for anything that adds **content**. Move a map or a weapons pack there and the server
+loads it while nobody else does; with `verifySignatures` on, every player is kicked for a
+missing addon. That failure names an addon class rather than a mod, so it is genuinely hard to
+trace back to a switch someone flipped on this page.
+
+The switch is two writes to two separate variables with no transaction across them, so it
+**adds to the destination first and removes from the source second**. A failure then leaves the
+mod in both lists — legal, visible here as two rows, and fixed by pressing the button again —
+rather than in neither, which is a mod that silently vanished from a load order the customer
+thought they were editing.
+
+The action is hidden entirely on a profile with no `-serverMod=` variable. A headless client
+joins a mission and hosts nothing, so the concept does not apply and the button could only ever
+produce an error naming a variable the customer cannot add.
+
+A mod may legally sit in **both** lists, which is why the table keys its rows by list and every
+row action is told which list it came from. Searching for the entry by name instead is how
+Remove on a server-only row used to delete the client entry, and how the reorder arrows on a
+server-only row used to do nothing at all — both silently. `PageHooksTest` fails the build if a
+row action stops passing its scope.
+
+### Reinstalling a mod
+
+**Reinstall** on a row deletes a mod's files and makes the next start fetch it again. It is for
+the case where a mod is corrupt, half-downloaded, or stuck on a version SteamCMD believes is
+current when it is not.
+
+**Deleting the files is not enough, and that is the whole point of this button.** SteamCMD keeps
+its own record of what it has in `<workshop root>/appworkshop_107410.acf`, and it trusts that
+record over the disk. An item listed there with a current manifest is "installed", so
+`workshop_download_item` reports success and transfers nothing. Delete the files by hand, leave
+the ACF, and the mod stays missing through download after download — which is exactly the state
+that gets described as SteamCMD losing track of a mod's version.
+
+So three things go:
+
+1. `@<id>` and `@<id>_optional` — the folders the server loads
+2. `<root>/content/107410/<id>`, and any half-finished `downloads/` copy
+3. **the item's entry in the ACF**
+
+The mod stays in the load order. Nothing is downloaded here; the egg fetches what is missing on
+the next start, which is when Arma would pick it up regardless.
+
+#### Why the ACF is edited rather than deleted
+
+Deleting `appworkshop_107410.acf` outright is the folk remedy and it does work, but it discards
+the record for **every** mod on the server. The next start has no idea what it already has, so a
+customer reinstalling one broken 200 MB mod gets their whole 40 GB set re-fetched — a bandwidth
+bill and hours of downtime, caused by a button labelled "reinstall this mod".
+
+`SteamAcf` therefore removes just that item's two blocks — it appears in both
+`WorkshopItemsInstalled` and `WorkshopItemDetails`, and leaving either half behind lets SteamCMD
+go on believing it.
+
+**It refuses rather than guesses.** The result is brace-checked before and after the edit, an id
+is only matched where it introduces a block (so `"manifest" "450814997"` is never mistaken for
+an entry), and braces inside quoted values — a mod title with a `{` in it — do not derail the
+cut. Anything unexpected returns null and nothing is written: a corrupt ACF is not one mod
+failing to update, it is SteamCMD unable to read its own state for every mod on the server.
+
+A refusal is **reported, not swallowed.** The notification says the files went but the record did
+not, and points at the file to delete by hand. Staying quiet there would leave a customer
+pressing Reinstall repeatedly against a mod SteamCMD had already decided it owned.
+
+`SteamAcfTest` has 36 assertions and most of them are refusals.
 
 ### Watching the download
 
@@ -90,17 +176,50 @@ The Mods page polls every five seconds and shows each mod as **Downloaded**, **D
 or **Waiting**, with a running count above the table.
 
 Those three states are real rather than inferred. SteamCMD stages an item in
-`steamapps/workshop/downloads/<app>/<id>` while it transfers and **moves** it into
+`<workshop root>/downloads/<app>/<id>` while it transfers and **moves** it into
 `content/<app>/<id>` when it completes, so two directory listings answer the question exactly.
 Both are memoised per request, so a ninety-mod list costs two listings a tick, not two per row.
 
-What it cannot show is a percentage *within* one mod: SteamCMD's transfer output never reaches
-the panel. A 10 GB mod therefore sits on "Downloading" for a long time and then completes.
-That is said on the row's tooltip rather than papered over with a bar that moves smoothly and
-means nothing.
+**The root is `Steam/steamapps/workshop`, not `steamapps/workshop`.** `workshop_download_item`
+runs without `+force_install_dir`, so SteamCMD falls back to `$HOME/Steam`; only the game is
+installed to the server root. This plugin assumed the shorter path for its whole life, the
+listing 404'd, `listDirectories()` swallowed it, and so **every mod read "Waiting" forever**
+while the downloads worked perfectly. `ModService::workshopRoot()` now probes for it and
+`PageHooksTest` fails the build on a bare literal.
+
+### What the two eggs can tell you
+
+On the **stock Arma 3 egg** there is no percentage within one mod: SteamCMD's transfer output
+never reaches the panel. A 10 GB mod sits on "Downloading" for a long time and then completes,
+which the tooltip says rather than papering over it with a bar that moves smoothly and means
+nothing. Worse, a **failed** mod is invisible — SteamCMD reports the failure to the console,
+which scrolls away, and on disk a mod that gave up after three attempts is identical to one not
+yet reached. Both read as "Waiting".
+
+On the [**arma3-manager egg**](https://github.com/FyWolf/arma3-manager-egg) the container
+writes `.arma3-manager/status.json` and the page reads it: a real percentage per mod, the name
+the egg resolved, and — the one a directory listing can never give — the reason a download
+failed, on the row that failed. The percentage is the size on disk against the size Steam
+reported, so it steps rather than glides.
+
+`DownloadStatus` handles the file, and every accessor answers "I don't know" rather than
+throwing, because the stock egg writes nothing. A `mods` phase that has stopped being rewritten
+is treated as stale and the listings win again — otherwise a container killed mid-download would
+claim a mod was downloading forever, which looks exactly like a slow mod.
+
+The panel supplies the other half: `writeWanted()` publishes each mod's name and expected size
+to `.arma3-manager/wanted.json` on every save, because the sizes live behind the Steam Web API
+and the container has no credentials but the customer's own. Without that file the egg still
+reports state; there is simply no percentage.
 
 The panel does not start the download — it has no Steam credentials, by design. The egg fetches
 what is listed the next time the server **starts**; nothing here needs a reinstall.
+
+On the arma3-manager egg, `A3M_SYNC_ONLY=1` makes a start download everything and then exit
+without launching the game, so a large set can be fetched ahead of a session. That is as close
+to "download now" as is possible or useful: Arma reads its mod list once, at startup, so mods
+fetched under a running server would not load until the next restart anyway. The only thing ever
+in question is when the restart happens.
 
 Creator DLC **are** in that list — the field is documented as "useful for loading CDLCs" and its
 own example includes `vn`. They are loaded but never downloaded, so the Mods page shows them as
@@ -113,12 +232,14 @@ client for a missing addon, naming a class rather than a mod.
 
 ## Developing
 
-Seven checks, five of which need no panel at all:
+Nine checks, seven of which need no panel at all:
 
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 73 load-order assertions
-php tests/LauncherPresetTest.php                  # 104 preset/id/entry assertions
+php tests/LauncherPresetTest.php                  # 106 preset/id/entry assertions
+php tests/DownloadStatusTest.php                  # 49 status.json parsing assertions
+php tests/SteamAcfTest.php                        # 36 ACF edit/refusal assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
 php tests/PageHooksTest.php                       # page conventions: headers, uploads, mod ids
@@ -373,6 +494,7 @@ permission types are introduced.
 | Change the load order, import a preset, install a mod set | `startup.update` + `file.update` |
 | Schedule or unschedule a mission | `file.update` |
 | Delete a mission | `file.delete` |
+| Reinstall a mod (delete its files and SteamCMD's record) | `file.delete` + `file.update` |
 | See startup parameters | `startup.read` |
 | Change startup parameters | `startup.update` |
 

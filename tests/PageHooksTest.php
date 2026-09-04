@@ -290,6 +290,62 @@ foreach ($paths as $offender) {
     echo "       $offender\n";
 }
 
+// ---------------------------------------------------------------------------
+// A row action must act on the list its row came from.
+// ---------------------------------------------------------------------------
+//
+// The Mods page renders two lists — `-mod=` and `-serverMod=` — into one table,
+// and a mod may legally be in both, which shows as two rows. An action that
+// takes only the entry name has to guess which list it meant, and it guessed by
+// searching the client list first. Two silent bugs came out of that:
+//
+//   - Remove on a server-only row deleted the *client* entry instead. The row
+//     the customer clicked stayed exactly where it was.
+//   - The reorder arrows read the client list unconditionally, found no index
+//     for a server-only row, and returned. A button that did nothing and said
+//     nothing.
+//
+// Neither raised an error, and both look completely reasonable in the source.
+// The row already knows which list it came from, so the fix is to pass it —
+// and this check is here because "look it up again" is the natural thing to
+// write and reads fine every time.
+
+$scoped = [];
+
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(dirname(__DIR__) . '/src')) as $file) {
+    if ($file->isDir() || $file->getExtension() !== 'php') {
+        continue;
+    }
+
+    $name = $file->getBasename();
+    $source = file_get_contents($file->getPathname());
+    $source = preg_replace('#/\*.*?\*/#s', '', $source) ?? $source;
+    $source = preg_replace('#//[^\n]*#', '', $source) ?? $source;
+
+    if (preg_match_all('#\$this->(remove|move|setScope)\((\$record\[[^)]*)\)#', $source, $matches, PREG_SET_ORDER) === 0) {
+        continue;
+    }
+
+    foreach ($matches as $match) {
+        // setScope takes the target scope as its own argument, so it is already
+        // explicit about which list it is writing to.
+        if ($match[1] === 'setScope') {
+            continue;
+        }
+
+        if (! str_contains($match[2], 'server_only')) {
+            $scoped[] = "$name calls \$this->{$match[1]}() on a row without passing \$record['server_only'], so it will guess which of the two mod lists to act on.";
+        }
+    }
+}
+
+echo "\nRow scope:\n";
+check('a row action is told which mod list its row came from', $scoped, []);
+
+foreach ($scoped as $offender) {
+    echo "       $offender\n";
+}
+
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "Checked $checked page class(es).\n";
 echo "$pass passed, $fail failed\n";
