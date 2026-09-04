@@ -120,6 +120,13 @@ check('an old mods phase is not', status(['phase' => 'mods', 'updated_at' => tim
 check('a mods phase with no timestamp is not', status(['phase' => 'mods', 'updated_at' => 0])->isStale(), true);
 // Terminal phases are never rewritten again, so age proves nothing about them.
 check('an old running phase is still true', status(['phase' => 'running', 'updated_at' => time() - 86400])->isStale(), false);
+// The background daemon's phase. Missing it here is the subtler bug: a sync
+// killed halfway would show a mod downloading forever on a healthy server.
+check('a fresh syncing phase is believed', status(['phase' => 'syncing'])->isStale(), false);
+check('an old syncing phase is not', status(['phase' => 'syncing', 'updated_at' => time() - 600])->isStale(), true);
+check('a fresh syncing phase reads as syncing', status(['phase' => 'syncing'])->isSyncing(), true);
+check('a stale syncing phase does not', status(['phase' => 'syncing', 'updated_at' => time() - 600])->isSyncing(), false);
+check('running is not syncing', status(['phase' => 'running'])->isSyncing(), false);
 check('an old synced phase is still true', status(['phase' => 'synced', 'updated_at' => time() - 86400])->isStale(), false);
 check('the boundary is not stale', status(['phase' => 'mods', 'updated_at' => time() - DownloadStatus::STALE_AFTER_SECONDS + 5])->isStale(), false);
 

@@ -529,6 +529,61 @@ class ModsPage extends Page implements HasTable
                     }
                 }),
 
+            Action::make('download')
+                ->label('Download now')
+                ->icon('tabler-cloud-download')
+                ->color('success')
+                // Only on an egg that carries the sync daemon. On the stock egg
+                // there is nothing watching for the request, so the button would
+                // write a file into a directory nobody reads and report success.
+                ->visible(fn (): bool => $this->canEdit()
+                    && app(ModService::class)->supportsBackgroundSync($this->server()))
+                ->requiresConfirmation()
+                ->modalHeading('Download the missing mods now')
+                ->modalDescription('Fetches everything in the load order that is not already on disk, in the background, while the server keeps running. Players are not disconnected and nothing restarts.
+
+The mods are *loaded* at the next restart — Arma reads its mod list once, at startup — but that restart is then instant instead of waiting for the download.
+
+If the server is stopped, this is picked up the next time it starts.')
+                ->modalSubmitActionLabel('Start downloading')
+                ->action(function (): void {
+                    try {
+                        $mods = app(ModService::class);
+                        $server = $this->server();
+                        $profile = $this->profile();
+
+                        $requested = $mods->requestSync($server, $profile);
+
+                        if ($requested === []) {
+                            Notification::make()
+                                ->title('Nothing to download')
+                                ->body('Every Workshop mod in the load order is already on disk.')
+                                ->success()
+                                ->send();
+
+                            return;
+                        }
+
+                        Activity::event('server:arma3.mod-download')
+                            ->property(['mods' => $requested])
+                            ->log();
+
+                        Notification::make()
+                            ->title(count($requested) . ' mod(s) queued for download')
+                            ->body('The server picks this up within a few seconds and downloads in the background. This page shows each one arriving; you do not need to stay on it.')
+                            ->success()
+                            ->send();
+                    } catch (Throwable $exception) {
+                        report($exception);
+
+                        Notification::make()
+                            ->title('Could not ask for a download')
+                            ->body($exception->getMessage())
+                            ->danger()
+                            ->send();
+                    }
+                }),
+
             Action::make('files')
                 ->label('File manager')
                 ->icon('tabler-folder-open')

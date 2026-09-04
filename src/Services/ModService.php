@@ -624,6 +624,77 @@ class ModService
     }
 
     /**
+     * Whether this server's egg can download mods while it is running.
+     *
+     * Detected from the egg declaring `A3M_BACKGROUND_SYNC` rather than from
+     * `status.json` existing, because the two answer different questions: the
+     * variable says the *egg* has the daemon, the file says a container has
+     * already booted with it. Gating on the file would hide the button on a
+     * correctly configured server that has simply never been started.
+     */
+    public function supportsBackgroundSync(Server $server): bool
+    {
+        return in_array('A3M_BACKGROUND_SYNC', ServerVariables::declared($server), true);
+    }
+
+    /**
+     * Ask the running container to download mods now, without a restart.
+     *
+     * Writes `.arma3-manager/request.json`, which the egg's sync daemon picks up
+     * within its poll interval. The panel does not download anything itself and
+     * still holds no Steam credentials — this is a request, not a transfer.
+     *
+     * ## Why the ids are always named explicitly
+     *
+     * The daemon can fall back to the load order it booted with, and that
+     * fallback is a trap: `MODIFICATIONS` is read once, at container start, so
+     * it is stale the moment the load order is edited here. A request that
+     * relied on it would quietly fetch the *previous* mod list — which is
+     * exactly the sort of silent, plausible-looking wrong answer this codebase
+     * keeps finding. So the ids go in the file.
+     *
+     * `wanted.json` is refreshed first so the daemon has names and sizes for
+     * anything newly added, and can therefore report a percentage rather than
+     * just a state.
+     *
+     * @param  array<int, string>|null  $ids  null means everything still missing
+     * @return array<int, string> the ids actually requested
+     */
+    public function requestSync(Server $server, ResolvedProfile $profile, ?array $ids = null): array
+    {
+        $path = trim((string) config('arma3-manager.steamcmd.request_path', ''), '/');
+
+        if ($path === '') {
+            throw new RuntimeException('No request path is configured, so a background download cannot be asked for.');
+        }
+
+        if ($ids === null) {
+            $ids = array_values(array_filter(array_map(
+                WorkshopId::fromModEntry(...),
+                $this->missing($server, $profile),
+            )));
+        }
+
+        $ids = array_values(array_unique(array_filter($ids, WorkshopId::isValid(...))));
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $this->writeWanted($server, $profile);
+
+        DaemonDirs::ensure($this->repository, dirname($path));
+
+        $this->repository->setServer($server)->putContent($path, json_encode([
+            'version' => 1,
+            'requested_at' => time(),
+            'mods' => $ids,
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+
+        return $ids;
+    }
+
+    /**
      * Force one Workshop mod to be fetched from scratch on the next start.
      *
      * ## Deleting the files is not enough

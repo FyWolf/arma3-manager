@@ -147,6 +147,12 @@ return [
         'status_path' => env('A3M_STATUS_PATH', '.arma3-manager/status.json'),
         'wanted_path' => env('A3M_WANTED_PATH', '.arma3-manager/wanted.json'),
 
+        // Written here and watched by the egg's sync daemon: "download these,
+        // now, without restarting". The panel still transfers nothing and still
+        // holds no Steam credentials — this is a request, and the container's
+        // own account does the work.
+        'request_path' => env('A3M_REQUEST_PATH', '.arma3-manager/request.json'),
+
         'workshop_roots' => array_values(array_filter(array_map(
             'trim',
             explode(',', (string) env(

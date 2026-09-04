@@ -13,20 +13,20 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 397 passing
+`use` resolves against a real panel's autoloader, and the parsers have 402 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
 The download reporting has a companion egg,
 [`arma3-manager-egg`](https://github.com/FyWolf/arma3-manager-egg), which makes per-mod
-percentages and failure reasons possible. It is optional; everything works on the stock egg
-with less to show.
+percentages, failure reasons and **downloading mods while the server runs** possible. It is
+optional; everything works on the stock egg with less to show and no background download.
 
 | Feature | State |
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
 | Egg coverage screen — what every egg resolves to, and why | built |
-| Mods — load order, position, add/remove, client vs server-only, reinstall, live download progress | built |
+| Mods — load order, position, add/remove, client vs server-only, reinstall, background download, live progress | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
@@ -212,8 +212,39 @@ to `.arma3-manager/wanted.json` on every save, because the sizes live behind the
 and the container has no credentials but the customer's own. Without that file the egg still
 reports state; there is simply no percentage.
 
-The panel does not start the download — it has no Steam credentials, by design. The egg fetches
-what is listed the next time the server **starts**; nothing here needs a reinstall.
+### Downloading in the background
+
+On the [arma3-manager egg](https://github.com/FyWolf/arma3-manager-egg), **Download now** fetches
+everything missing from the load order **while the server keeps running**. Nobody is
+disconnected and nothing restarts.
+
+It works by writing `.arma3-manager/request.json`, which a daemon inside the container picks up
+within seconds. The panel still transfers nothing and still holds no Steam credentials — it asks,
+and the container's own Steam account does the work.
+
+**The ids are always named in the request.** The daemon can fall back to the load order it booted
+with, and that fallback is a trap: `MODIFICATIONS` is read once, at container start, so it is
+stale the moment the load order is edited here. A request relying on it would quietly fetch the
+*previous* mod list, which is exactly the kind of silent, plausible-looking wrong answer this
+codebase keeps turning up.
+
+**Mods are still activated by a restart.** Arma reads its mod list once, at startup, and nothing
+can change that — so the download is what becomes asynchronous, not the loading. The gain is
+real anyway: the restart is then as fast as one with no mod changes at all, instead of being
+however long a 40 GB download takes.
+
+The button is hidden on the stock egg, because nothing there watches for the request and it would
+otherwise write a file into a directory nobody reads and report success. Availability is detected
+from the egg declaring `A3M_BACKGROUND_SYNC`, not from `status.json` existing — the variable says
+the egg *has* the daemon, the file only says a container has already booted with it, and gating
+on the file would hide the button on a correctly configured server that has never been started.
+
+`DownloadStatus` treats `syncing` as a live phase alongside `mods`, so a background sync killed
+halfway goes stale and falls back to the disk rather than showing a mod downloading forever on a
+server that is otherwise running perfectly.
+
+The panel does not start the download itself — it has no Steam credentials, by design. On the
+stock egg the fetch happens the next time the server **starts**; nothing here needs a reinstall.
 
 On the arma3-manager egg, `A3M_SYNC_ONLY=1` makes a start download everything and then exit
 without launching the game, so a large set can be fetched ahead of a session. That is as close
@@ -238,7 +269,7 @@ Nine checks, seven of which need no panel at all:
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 73 load-order assertions
 php tests/LauncherPresetTest.php                  # 106 preset/id/entry assertions
-php tests/DownloadStatusTest.php                  # 49 status.json parsing assertions
+php tests/DownloadStatusTest.php                  # 54 status.json parsing assertions
 php tests/SteamAcfTest.php                        # 36 ACF edit/refusal assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
@@ -495,6 +526,7 @@ permission types are introduced.
 | Schedule or unschedule a mission | `file.update` |
 | Delete a mission | `file.delete` |
 | Reinstall a mod (delete its files and SteamCMD's record) | `file.delete` + `file.update` |
+| Ask for a background download | `startup.update` + `file.update` |
 | See startup parameters | `startup.read` |
 | Change startup parameters | `startup.update` |
 
