@@ -29,9 +29,18 @@ use Throwable;
  * So this walks the whole chain and prints what it found at each step. It is
  * read-only: it resolves, reads and reports, and writes nothing anywhere.
  *
- * Values are printed as they are. This variable holds mod folder names, not
- * credentials — the Steam account lives in STEAM_USER / STEAM_PASS, which this
- * never touches and never prints.
+ * ## Values are redacted unless they are safe to show
+ *
+ * An earlier version claimed it never touched credentials, and then dumped every
+ * `server_variables` row for the server — including `STEAM_PASS`,
+ * `SERVER_PASSWORD` and `RCON_PASSWORD`. A diagnostic command is pasted into
+ * tickets and chat logs by definition, so that is the worst possible place for
+ * a secret to appear, and the claim in this docblock is exactly what made it
+ * feel safe to run.
+ *
+ * So the rule is inverted: a value is masked unless its name is one this plugin
+ * itself manages. `secretish()` decides, it errs towards masking, and a masked
+ * value still shows its length so "is it set" stays answerable.
  */
 class DiagnoseServerCommand extends Command
 {
@@ -197,7 +206,7 @@ class DiagnoseServerCommand extends Command
                 ->first();
 
             $this->line('  direct lookup   ' . ($direct
-                ? 'row id ' . $direct->id . ', value: ' . ($direct->variable_value === '' ? '(empty)' : $direct->variable_value)
+                ? 'row id ' . $direct->id . ', value: ' . $this->display((string) $target->env_variable, (string) $direct->variable_value)
                 : 'NO ROW for (server ' . $server->id . ', variable ' . $target->id . ')'));
         }
 
@@ -211,15 +220,12 @@ class DiagnoseServerCommand extends Command
             $names[$variable->id] = (string) $variable->env_variable;
         }
 
+        $this->line('  (values are masked unless this plugin manages that variable)');
+
         foreach ($rows as $row) {
             $name = $names[$row->variable_id] ?? '(variable ' . $row->variable_id . ' is not on this egg)';
-            $value = (string) $row->variable_value;
 
-            $this->line(sprintf(
-                '    %-28s %s',
-                $name,
-                $value === '' ? '(empty)' : mb_strimwidth($value, 0, 60, '…'),
-            ));
+            $this->line(sprintf('    %-28s %s', $name, $this->display($name, (string) $row->variable_value)));
         }
     }
 
@@ -318,6 +324,63 @@ class DiagnoseServerCommand extends Command
         $modsDir = $profile->modsDir();
 
         $this->line('  mods dir     /' . $modsDir . ' — ' . count($mods->listDirectories($server, $modsDir)) . ' director(ies)');
+    }
+
+    /**
+     * A value fit to paste into a ticket.
+     *
+     * Masked unless this plugin manages the variable, because the alternative —
+     * masking only what *looks* secret — has to be right every time, and was
+     * already wrong once.
+     */
+    private function display(string $name, string $value): string
+    {
+        if ($value === '') {
+            return '(empty)';
+        }
+
+        if ($this->secretish($name)) {
+            return '(set, ' . mb_strlen($value) . ' characters, hidden)';
+        }
+
+        return mb_strimwidth($value, 0, 60, '…');
+    }
+
+    /**
+     * Whether a variable's value must not be printed.
+     *
+     * An allowlist rather than a denylist. The variables this plugin writes are
+     * mod folder names and startup flags and are safe to show; **everything
+     * else on the egg is assumed to be a secret**, whatever it is called. A
+     * denylist of PASS/TOKEN/KEY would have caught `STEAM_PASS`, and would still
+     * miss the next egg's `LICENCE` or `WEBHOOK`.
+     */
+    private function secretish(string $name): bool
+    {
+        $mine = array_map('strtoupper', [
+            ...(array) config('arma3-manager.steamcmd.mod_list_variables', []),
+            ...(array) config('arma3-manager.steamcmd.servermod_list_variables', []),
+            ...array_merge(...array_map(
+                static fn (array $profile): array => [
+                    ...(array) ($profile['mod_list_variables'] ?? []),
+                    ...(array) ($profile['servermod_list_variables'] ?? []),
+                    ...(array) ($profile['parameter_variables'] ?? []),
+                    ...(array) ($profile['headless_variables'] ?? []),
+                ],
+                array_values((array) config('arma3-manager.profiles', [])),
+            ) ?: [[]]),
+            // Named explicitly because they are useful context for a mod
+            // problem and carry nothing sensitive.
+            'MOD_FILE',
+            'OPTIONALMODS',
+            'MODS_LOWERCASE',
+            'STEAMCMD_APPID',
+            'SERVER_BINARY',
+            'UPDATE_SERVER',
+            'VALIDATE_SERVER',
+        ]);
+
+        return ! in_array(strtoupper($name), $mine, true);
     }
 
     private function findServer(string $identifier): ?Server
