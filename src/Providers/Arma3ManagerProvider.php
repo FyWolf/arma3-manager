@@ -5,6 +5,7 @@ namespace FyWolf\Arma3Manager\Providers;
 use App\Models\ApiKey;
 use App\Models\Egg;
 use App\Models\Role;
+use FyWolf\Arma3Manager\Console\Commands\DiagnoseServerCommand;
 use FyWolf\Arma3Manager\Console\Commands\PruneStaleInstallsCommand;
 use FyWolf\Arma3Manager\Console\Commands\SyncProfilesCommand;
 use FyWolf\Arma3Manager\Http\Controllers\Api\ModSetController;
@@ -77,6 +78,7 @@ class Arma3ManagerProvider extends ServiceProvider
             $this->commands([
                 SyncProfilesCommand::class,
                 PruneStaleInstallsCommand::class,
+                DiagnoseServerCommand::class,
             ]);
         }
     }
@@ -160,6 +162,8 @@ class Arma3ManagerProvider extends ServiceProvider
             'activity.server.arma3.config-locked-rejected' => 'Attempted to change locked setting(s) <b>:keys</b> in <b>:file</b>',
             'activity.server.arma3.preset-import' => 'Imported the launcher preset <b>:preset</b> (:mods mods)',
             'activity.server.arma3.preset-export' => 'Exported the launcher preset <b>:preset</b>',
+            'activity.server.arma3.preset-apply' => 'Made <b>:preset</b> the active preset (:mods mods)',
+            'activity.server.arma3.preset-delete' => 'Deleted the saved preset <b>:preset</b>',
             'activity.server.arma3.parameters-edit' => 'Changed the startup parameters (:changed)',
             'activity.server.arma3.modset-install' => 'Installed the mod set <b>:set</b> (:items items)',
             'activity.server.arma3.modset-failed' => 'Failed to install the mod set <b>:set</b>: :error',

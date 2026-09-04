@@ -22,6 +22,7 @@ use Filament\Tables\Contracts\HasTable;
 use Filament\Tables\Table;
 use FyWolf\Arma3Manager\Enums\Capability;
 use FyWolf\Arma3Manager\Integrations\Workshop\SteamWorkshopClient;
+use FyWolf\Arma3Manager\Models\Preset;
 use FyWolf\Arma3Manager\Services\ModService;
 use FyWolf\Arma3Manager\Support\CapabilityResolver;
 use FyWolf\Arma3Manager\Support\InvalidPresetException;
@@ -119,47 +120,147 @@ class PresetsPage extends Page implements HasTable
     }
 
     /**
-     * The current load order, which is what an export would contain.
+     * The presets saved for this server.
      *
-     * Shown rather than described: "export your preset" with nothing on screen
-     * gives the customer no way to check they are exporting what they think.
+     * Importing used to merge a preset into the load order and throw the file
+     * away, so this page showed the load order and nothing else — which is the
+     * Mods page's job, and left a customer with no way to keep two modsets and
+     * switch between them. A unit that plays two campaigns has two presets.
      */
     public function table(Table $table): Table
     {
         return $table
             ->records(function (): array {
                 $order = app(ModService::class)->loadOrder($this->server(), $this->profile());
-                $titles = app(SteamWorkshopClient::class)->items(array_filter(array_map(
-                    WorkshopId::fromModEntry(...),
-                    $order->all(),
-                )));
 
                 $records = [];
-                $position = 1;
 
-                foreach ($order->all() as $entry) {
-                    $records[$entry] = [
-                        'entry' => $entry,
-                        'position' => $position++,
-                        // The title when Steam knows it, the id otherwise. The
-                        // load order is ids, and a column of bare numbers is not
-                        // something anyone can check against their launcher.
-                        'name' => $titles[WorkshopId::fromModEntry($entry) ?? '']->title ?? $entry,
+                foreach (Preset::query()->where('server_id', $this->server()->id)->orderBy('name')->get() as $preset) {
+                    $active = $preset->matches($order);
+
+                    $records[(string) $preset->id] = [
+                        'id' => $preset->id,
+                        'name' => $preset->name,
+                        'entries' => count($preset->entries ?? []),
+                        'workshop' => $preset->workshopCount(),
+                        'active' => $active,
+                        'status' => match (true) {
+                            $active => 'Active',
+                            $preset->applied_at !== null => 'Applied, then changed',
+                            default => 'Not applied',
+                        },
+                        'status_color' => match (true) {
+                            $active => 'success',
+                            $preset->applied_at !== null => 'warning',
+                            default => 'gray',
+                        },
+                        'applied_at' => $preset->applied_at?->diffForHumans(),
                     ];
                 }
 
                 return $records;
             })
             ->columns([
-                TextColumn::make('position')->label('#')->width('4rem'),
                 TextColumn::make('name')
-                    ->label('Mod')
+                    ->label('Preset')
                     ->weight('bold')
-                    ->description(fn (array $record): string => $record['entry']),
+                    ->description(fn (array $record): string => $record['entries'] . ' entr(ies), '
+                        . $record['workshop'] . ' from the Workshop'),
+
+                TextColumn::make('status')
+                    ->label('State')
+                    ->badge()
+                    ->color(fn (array $record): string => $record['status_color'])
+                    ->tooltip(fn (array $record): string => match ($record['status']) {
+                        'Active' => 'This preset is exactly what the server is set to load.',
+                        'Applied, then changed' => 'This was applied ' . ($record['applied_at'] ?? 'earlier') . ', and the load order has been edited since. Apply it again to go back to it.',
+                        default => 'Saved but never applied. Applying it replaces the load order.',
+                    }),
             ])
             ->paginated(false)
-            ->emptyStateHeading('Nothing in the load order yet')
-            ->emptyStateDescription('Import a preset to fill it, or add mods from the Workshop page.');
+            ->emptyStateHeading('No presets saved yet')
+            ->emptyStateDescription('Import the .html file the Arma 3 Launcher exports and it is kept here, so you can switch between modsets later.')
+            ->recordActions([
+                Action::make('apply')
+                    ->label('Make active')
+                    ->icon('tabler-circle-check')
+                    ->visible(fn (array $record): bool => $this->canEdit() && ! $record['active'])
+                    ->requiresConfirmation()
+                    ->modalHeading(fn (array $record): string => 'Make "' . $record['name'] . '" the active preset?')
+                    ->modalDescription('Replaces the whole load order with this preset. Anything currently loaded and not in it is removed — the files stay on disk, so applying another preset puts them back without downloading again.')
+                    ->action(fn (array $record) => $this->apply((int) $record['id'])),
+
+                Action::make('delete')
+                    ->label('Delete')
+                    ->icon('tabler-trash')
+                    ->color('danger')
+                    ->iconButton()
+                    ->visible(fn (): bool => $this->canEdit())
+                    ->requiresConfirmation()
+                    ->modalHeading(fn (array $record): string => 'Delete the preset "' . $record['name'] . '"?')
+                    ->modalDescription('Only the saved preset goes. The load order and the downloaded files are untouched.')
+                    ->action(fn (array $record) => $this->forget((int) $record['id'])),
+            ]);
+    }
+
+    /**
+     * Write a saved preset over the load order.
+     */
+    private function apply(int $id): void
+    {
+        if (! $this->canEdit()) {
+            Notification::make()->title(trans('arma3-manager::strings.permission_denied'))->danger()->send();
+
+            return;
+        }
+
+        $preset = Preset::query()->where('server_id', $this->server()->id)->find($id);
+
+        if (! $preset) {
+            Notification::make()->title('That preset no longer exists')->danger()->send();
+
+            return;
+        }
+
+        try {
+            app(ModService::class)->saveLoadOrder($this->server(), $this->profile(), $preset->modList());
+
+            $preset->forceFill(['applied_at' => now()])->save();
+
+            Activity::event('server:arma3.preset-apply')
+                ->property(['preset' => $preset->name, 'mods' => count($preset->entries ?? [])])
+                ->log();
+
+            Notification::make()
+                ->title('"' . $preset->name . '" is now the active preset')
+                ->body('Start the server to fetch anything new — the Mods page shows each one arriving.')
+                ->success()
+                ->send();
+        } catch (Throwable $exception) {
+            report($exception);
+
+            Notification::make()->title('Could not apply the preset')->body($exception->getMessage())->danger()->send();
+        }
+    }
+
+    private function forget(int $id): void
+    {
+        if (! $this->canEdit()) {
+            Notification::make()->title(trans('arma3-manager::strings.permission_denied'))->danger()->send();
+
+            return;
+        }
+
+        $preset = Preset::query()->where('server_id', $this->server()->id)->find($id);
+
+        if ($preset) {
+            $name = $preset->name;
+            $preset->delete();
+
+            Activity::event('server:arma3.preset-delete')->property(['preset' => $name])->log();
+
+            Notification::make()->title('Preset deleted')->success()->send();
+        }
     }
 
     /**
@@ -229,9 +330,10 @@ class PresetsPage extends Page implements HasTable
                 ->action(fn (array $data) => $this->import($data)),
 
             Action::make('export')
-                ->label('Export a preset')
+                ->label('Export what is loaded')
                 ->icon('tabler-file-export')
                 ->color('gray')
+                ->modalDescription('Writes the server\'s current load order as a launcher preset, so a player can load the same mods. Exports what is actually loaded right now, which may differ from any saved preset.')
                 ->schema([
                     TextInput::make('name')
                         ->label('Preset name')
@@ -305,6 +407,13 @@ class PresetsPage extends Page implements HasTable
             $before = $order->count();
             $unknown = 0;
 
+            // What this preset *is*, kept separately from what the load order
+            // becomes. With "replace" off the two differ — the load order is
+            // the merge, the preset is only its own mods — and saving the merge
+            // under the preset's name would mean re-applying it later pulled in
+            // whatever happened to be loaded on the day it was imported.
+            $presetEntries = [];
+
             foreach ($resolved as $id) {
                 $item = $items[$id] ?? null;
 
@@ -319,10 +428,21 @@ class PresetsPage extends Page implements HasTable
 
                 // `@` + the id — see WorkshopPage for why the prefix is what
                 // makes it download.
-                $order->add(WorkshopId::modEntry($item->id));
+                $entry = WorkshopId::modEntry($item->id);
+
+                $presetEntries[] = $entry;
+                $order->add($entry);
             }
 
             $mods->saveLoadOrder($server, $profile, $order);
+
+            // Kept, so the customer can switch back to it later. Keyed on the
+            // name per server, so exporting the same preset from the launcher
+            // twice updates one row instead of growing near-duplicates.
+            $saved = Preset::updateOrCreate(
+                ['server_id' => $server->id, 'name' => $preset->name],
+                ['entries' => $presetEntries, 'applied_at' => now()],
+            );
 
             Activity::event('server:arma3.preset-import')
                 ->property([
@@ -335,9 +455,9 @@ class PresetsPage extends Page implements HasTable
             $added = max(0, $order->count() - $before);
 
             Notification::make()
-                ->title('Imported "' . $preset->name . '"')
+                ->title('Imported "' . $saved->name . '"')
                 ->body(trim(
-                    $added . ' mod(s) now in the load order.'
+                    'Saved as a preset and made active. ' . $added . ' mod(s) now in the load order.'
                     . ($unknown > 0 ? " {$unknown} item(s) could not be resolved on Steam and were skipped." : '')
                     . ($preset->dlc !== [] ? ' ' . count($preset->dlc) . ' Creator DLC in the preset were not imported — enable those on the Parameters page.' : '')
                     . ' Start the server to fetch them — the Mods page shows each one arriving.'
