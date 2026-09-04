@@ -138,7 +138,7 @@ class InstallModSetJob implements ShouldQueue
             $order = $mods->loadOrder($server, $profile);
 
             foreach ($resolved as $id) {
-                $order->add($id);
+                $order->add(WorkshopId::modEntry($id));
             }
 
             $mods->saveLoadOrder($server, $profile, $order);
@@ -152,7 +152,7 @@ class InstallModSetJob implements ShouldQueue
                     $id = is_array($mod) ? WorkshopId::extract((string) ($mod['id'] ?? '')) : null;
 
                     if ($id !== null) {
-                        $serverOrder->add($id);
+                        $serverOrder->add(WorkshopId::modEntry($id));
                     }
                 }
 

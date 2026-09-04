@@ -156,7 +156,7 @@ class WorkshopPage extends Page implements HasTable
                         'size' => $item->sizeForHumans(),
                         'requires' => count($item->children),
                         'installable' => $item->isInstallable(),
-                        'in_order' => $order->has($item->id),
+                        'in_order' => $order->has(WorkshopId::modEntry($item->id)),
                         'url' => WorkshopId::url($item->id),
                     ];
                 }
@@ -305,14 +305,16 @@ class WorkshopPage extends Page implements HasTable
                     continue;
                 }
 
-                // The **id**, never a name. The list this writes is read by the
-                // egg's install script, and the only value SteamCMD can act on
-                // is an id. An earlier version wrote a folder name guessed from
-                // the Steam title, which downloaded nothing at all: the script
-                // cannot fetch a name, and the guess did not match the folder
-                // the publisher actually shipped.
-                if (! $order->has($item->id)) {
-                    $order->add($item->id);
+                // `@` + the id. The egg matches Workshop items on that exact
+                // shape — "any mods in this list that are in @workshopID form
+                // will also be included in Automatic Updates" — so the prefix
+                // is what makes the mod download rather than being read as a
+                // folder name nobody uploaded. It also satisfies the field's
+                // "no folders starting with a number" rule.
+                $entry = WorkshopId::modEntry($item->id);
+
+                if (! $order->has($entry)) {
+                    $order->add($entry);
                     $added++;
                 }
             }

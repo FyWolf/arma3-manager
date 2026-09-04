@@ -209,7 +209,7 @@ class ParametersPage extends ServerFormPage
         foreach ((array) config('arma3-manager.parameters.creator_dlc', []) as $code => $label) {
             $toggle = Toggle::make("dlc.$code")
                 ->label($label)
-                ->helperText('Recorded in the manifest as `' . $code . '`. It is deliberately not added to the mod list, which holds Workshop ids that SteamCMD downloads — a CDLC is owned, not downloaded, so an id list is the wrong place for it.');
+                ->helperText('Adds `' . $code . '` to the mod list, which the egg documents as the place for CDLC. It is loaded but never downloaded — a CDLC ships with the game, so this only works if the Steam account on this server owns it.');
 
             $dlc[] = $canEdit ? $toggle : $toggle->disabled();
         }
@@ -283,11 +283,7 @@ class ParametersPage extends ServerFormPage
                 ServerVariables::write($server, $this->headlessVariables(), (string) (int) $state['headless']);
             }
 
-            $dlc = $this->selectedCreatorDlc($state['dlc'] ?? []);
-
-            if ($this->profile()->has(Capability::Mods)) {
-                app(ModService::class)->writeManifest($server, $this->profile());
-            }
+            $this->applyCreatorDlc($state['dlc'] ?? []);
 
             Activity::event('server:arma3.parameters-edit')
                 ->property(['changed' => $rendered === '' ? 'cleared' : $rendered])
@@ -297,14 +293,7 @@ class ParametersPage extends ServerFormPage
 
             Notification::make()
                 ->title('Parameters saved')
-                ->body(trim(
-                    'Arma reads its command line only at startup, so restart the server to apply them.'
-                    . ($dlc === []
-                        ? ''
-                        : ' Creator DLC are not downloadable, so they are not written into the mod list —'
-                          . ' add `-mod=' . implode(';', $dlc) . ';` to your startup parameters if your egg'
-                          . ' does not read the manifest.')
-                ))
+                ->body('Arma reads its command line only at startup, so restart the server to apply them.')
                 ->success()
                 ->send();
         } catch (Throwable $exception) {
@@ -315,36 +304,57 @@ class ParametersPage extends ServerFormPage
     }
 
     /**
-     * The Creator DLC the customer has switched on.
+     * Put the selected Creator DLC into the mod list, and take the rest out.
      *
-     * ## They are deliberately kept out of the mod list
+     * ## They belong there, and the egg says so
      *
-     * The mod list is **Workshop ids**, read by the egg's install script and
-     * fed to `workshop_download_item`. A CDLC is not a Workshop item: it is
-     * owned, ships with the game files, and has a short code (`gm`, `vn`) that
-     * is not an id at all. Writing one into that list — which an earlier version
-     * did — hands SteamCMD `gm` as though it were an id, and depending on the
-     * script that either logs a failure or takes the whole install down with it.
+     * The field is documented as *"a semicolon-separated list of additional mod
+     * folders to load. Useful for loading CDLCs or manually uploaded mods"*, and
+     * its own example is `myMod;vn;@123456789;@987654321;etc;` — `vn` being
+     * S.O.G. Prairie Fire.
      *
-     * So the selection is recorded in the manifest and nowhere else, and the
-     * page tells the customer the exact flag to add. That is less convenient
-     * than doing it for them, and it is the honest position until an egg is
-     * known to read the manifest: guessing that Arma merges a second `-mod=`
-     * parameter rather than replacing the first is exactly the kind of
-     * assumption that has already cost this plugin three releases.
+     * So the list is deliberately mixed: `@<id>` entries are Workshop items the
+     * egg also keeps updated, and a bare lowercase code is a CDLC that ships
+     * with the game and is loaded but never downloaded. A previous version
+     * removed CDLC from the list on the grounds that they are not downloadable,
+     * which is true and beside the point — the field is the load order as well
+     * as the download trigger.
      *
      * @param array<string, mixed> $selection
-     *
-     * @return array<int, string>
      */
-    private function selectedCreatorDlc(array $selection): array
+    private function applyCreatorDlc(array $selection): void
     {
         $codes = array_keys((array) config('arma3-manager.parameters.creator_dlc', []));
 
-        return array_values(array_filter(
-            $codes,
-            static fn (string $code): bool => (bool) ($selection[$code] ?? false),
-        ));
+        if ($codes === [] || ! $this->profile()->has(Capability::Mods)) {
+            return;
+        }
+
+        $mods = app(ModService::class);
+        $server = $this->getRecord();
+        $profile = $this->profile();
+
+        $order = $mods->loadOrder($server, $profile);
+        $changed = false;
+
+        foreach ($codes as $code) {
+            $wanted = (bool) ($selection[$code] ?? false);
+            $present = $order->has($code);
+
+            if ($wanted && ! $present) {
+                // Appended: a CDLC provides content and nothing depends on it,
+                // so it belongs after the mods that might patch it.
+                $order->add($code);
+                $changed = true;
+            } elseif (! $wanted && $present) {
+                $order->remove($code);
+                $changed = true;
+            }
+        }
+
+        if ($changed) {
+            $mods->saveLoadOrder($server, $profile, $order);
+        }
     }
 
     /**

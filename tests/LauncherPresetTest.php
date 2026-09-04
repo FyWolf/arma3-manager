@@ -309,6 +309,50 @@ check('arma:Type="preset" is still accepted', refused(
 ), false);
 check('an unrelated page is still refused', refused('<html><body><h1>Hello</h1></body></html>'), true);
 
+echo "\nMod-list entries — the @workshopID contract:\n";
+// The egg field this writes is documented as:
+//
+//   "A semicolon-separated list of additional mod folders to load. […] Any mods
+//    in this list that are in "@workshopID" form will also be included in
+//    Automatic Updates. NO capital letters, spaces, or folders starting with a
+//    number! (ex. myMod;vn;@123456789;@987654321;etc;)"
+//
+// Both halves have been got wrong once each — a guessed @Name that downloaded
+// nothing, then a bare id that the egg reads as a folder starting with a digit,
+// which is the one thing the field forbids.
+check('an id becomes @id', WorkshopId::modEntry('450814997'), '@450814997');
+check('modEntry is idempotent', WorkshopId::modEntry('@450814997'), '@450814997');
+check('surrounding whitespace is trimmed', WorkshopId::modEntry('  450814997 '), '@450814997');
+check('an @id entry has no capitals', WorkshopId::modEntry('450814997'), strtolower(WorkshopId::modEntry('450814997')));
+check('an @id entry does not start with a digit', preg_match('/^\d/', WorkshopId::modEntry('450814997')), 0);
+check('an @id entry has no spaces', str_contains(WorkshopId::modEntry('450814997'), ' '), false);
+
+echo "\nReading an entry back:\n";
+check('@id yields the id', WorkshopId::fromModEntry('@450814997'), '450814997');
+check('a bare id is not a Workshop entry', WorkshopId::fromModEntry('450814997'), null);
+check('a CDLC code is not a Workshop entry', WorkshopId::fromModEntry('vn'), null);
+check('a plain folder is not a Workshop entry', WorkshopId::fromModEntry('mymod'), null);
+check('an empty string is not a Workshop entry', WorkshopId::fromModEntry(''), null);
+check('whitespace is tolerated', WorkshopId::fromModEntry('  @450814997  '), '450814997');
+check('a very large id survives exactly', WorkshopId::fromModEntry('@18446744073709551615'), '18446744073709551615');
+
+// The trap that made a strict matcher necessary: extract() is forgiving on
+// purpose, so a folder with a year in its name would read as a Workshop id.
+check('extract() would misread a folder with digits in it', WorkshopId::extract('mymod2024'), '2024');
+check('fromModEntry() refuses it', WorkshopId::fromModEntry('mymod2024'), null);
+check('and refuses @-prefixed non-digits', WorkshopId::fromModEntry('@CBA_A3'), null);
+check('and refuses a mixed entry', WorkshopId::fromModEntry('@450814997x'), null);
+
+echo "\nThe example from the egg's own field:\n";
+// myMod;vn;@123456789;@987654321;etc;
+$example = ['myMod', 'vn', '@123456789', '@987654321', 'etc'];
+check('only the @ entries resolve to ids', array_values(array_filter(array_map(
+    WorkshopId::fromModEntry(...),
+    $example,
+))), ['123456789', '987654321']);
+check('the CDLC code is left alone', WorkshopId::fromModEntry('vn'), null);
+check('the hand-uploaded folder is left alone', WorkshopId::fromModEntry('myMod'), null);
+
 echo "\n" . str_repeat('-', 40) . "\n";
 echo "$pass passed, $fail failed\n";
 

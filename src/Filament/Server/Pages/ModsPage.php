@@ -162,21 +162,25 @@ class ModsPage extends Page implements HasTable
     {
         $order = app(ModService::class)->loadOrder($this->server(), $this->profile())->all();
 
-        if ($order === []) {
+        // Only the Workshop entries have a download to count. Including a CDLC
+        // or a hand-uploaded folder would make the total unreachable.
+        $ids = array_values(array_filter(array_map(WorkshopId::fromModEntry(...), $order)));
+
+        if ($ids === []) {
             return null;
         }
 
         ['downloaded' => $downloaded, 'downloading' => $downloading] = $this->disk();
 
-        $done = count(array_intersect($order, $downloaded));
-        $active = count(array_intersect($order, $downloading));
-        $waiting = max(0, count($order) - $done - $active);
+        $done = count(array_intersect($ids, $downloaded));
+        $active = count(array_intersect($ids, $downloading));
+        $waiting = max(0, count($ids) - $done - $active);
 
-        if ($done === count($order)) {
-            return 'All ' . $done . ' mod(s) downloaded. Restart the server to load them.';
+        if ($done === count($ids)) {
+            return 'All ' . $done . ' Workshop mod(s) downloaded. Restart the server to load them.';
         }
 
-        $parts = [$done . ' of ' . count($order) . ' downloaded'];
+        $parts = [$done . ' of ' . count($ids) . ' downloaded'];
 
         if ($active > 0) {
             $parts[] = $active . ' downloading';
@@ -215,45 +219,63 @@ class ModsPage extends Page implements HasTable
                 // shows "ACE3" rather than a column of numbers. Cached, and a
                 // Steam outage degrades to showing the id — which is still the
                 // thing the customer can paste into a workshop URL.
-                $titles = app(SteamWorkshopClient::class)->items([
-                    ...$order->all(),
-                    ...$serverOrder->all(),
-                ]);
+                $titles = app(SteamWorkshopClient::class)->items(array_filter(array_map(
+                    WorkshopId::fromModEntry(...),
+                    [...$order->all(), ...$serverOrder->all()],
+                )));
 
                 $records = [];
                 $position = 1;
 
                 $build = function (string $entry, string $scope, int $position) use ($downloaded, $downloading, $titles): array {
+                    // The list is deliberately mixed — `myMod;vn;@123456789;` —
+                    // so an entry is a Workshop item only when it is `@` plus
+                    // digits. A CDLC code or a hand-uploaded folder has no
+                    // download to report and must not be shown as "Waiting"
+                    // forever, because nothing will ever fetch it.
+                    $id = WorkshopId::fromModEntry($entry);
+
                     $state = match (true) {
-                        in_array($entry, $downloaded, true) => 'downloaded',
-                        in_array($entry, $downloading, true) => 'downloading',
+                        $id === null => 'local',
+                        in_array($id, $downloaded, true) => 'downloaded',
+                        in_array($id, $downloading, true) => 'downloading',
                         default => 'waiting',
                     };
 
                     return [
                         'entry' => $entry,
                         'position' => $position,
-                        'name' => $titles[$entry]->title ?? $entry,
-                        'id' => $entry,
+                        'name' => $id !== null ? ($titles[$id]->title ?? $entry) : $entry,
+                        'id' => $id,
+                        // The egg's field refuses capitals, spaces and folders
+                        // starting with a number. Anything this plugin writes
+                        // complies, but a hand-edited entry might not, and the
+                        // failure is the whole list being rejected rather than
+                        // that one entry.
+                        'invalid' => preg_match('/^[a-z0-9_@.\-]+$/', $entry) !== 1
+                            || preg_match('/^\d/', $entry) === 1,
                         'scope' => $scope,
                         'state' => $state,
                         'present' => $state === 'downloaded',
                         'status' => match ($state) {
                             'downloaded' => 'Downloaded',
                             'downloading' => 'Downloading',
+                            'local' => 'Not from the Workshop',
                             default => 'Waiting',
                         },
                         'status_color' => match ($state) {
                             'downloaded' => 'success',
                             'downloading' => 'info',
+                            'local' => 'warning',
                             default => 'gray',
                         },
                         'status_icon' => match ($state) {
                             'downloaded' => 'tabler-circle-check',
                             'downloading' => 'tabler-progress',
+                            'local' => 'tabler-folder',
                             default => 'tabler-clock',
                         },
-                        'url' => WorkshopId::isValid($entry) ? WorkshopId::url($entry) : null,
+                        'url' => $id !== null ? WorkshopId::url($id) : null,
                     ];
                 };
 
@@ -275,7 +297,12 @@ class ModsPage extends Page implements HasTable
                 TextColumn::make('name')
                     ->label('Mod')
                     ->weight('bold')
-                    ->description(fn (array $record): string => 'Workshop id ' . $record['id']),
+                    ->description(fn (array $record): string => $record['entry'])
+                    ->icon(fn (array $record): ?string => $record['invalid'] ? 'tabler-alert-triangle' : null)
+                    ->iconColor('danger')
+                    ->tooltip(fn (array $record): ?string => $record['invalid']
+                        ? 'This entry breaks the field\'s rules — no capital letters, no spaces, and it may not start with a number. The egg may reject the whole list.'
+                        : null),
                 TextColumn::make('scope')->label('Loaded by')->badge()->color('gray'),
                 TextColumn::make('status')
                     ->label('Download')
@@ -285,6 +312,7 @@ class ModsPage extends Page implements HasTable
                     ->tooltip(fn (array $record): string => match ($record['state']) {
                         'downloaded' => 'On disk, in steamapps/workshop/content.',
                         'downloading' => 'SteamCMD is transferring this now. There is no percentage available — its output does not reach the panel — so a large mod sits here for a while and then completes.',
+                        'local' => 'Not an @workshopID entry, so nothing downloads it. A Creator DLC ships with the game; a plain folder name has to be uploaded yourself.',
                         default => 'Queued. SteamCMD fetches items one at a time, in order.',
                     }),
             ])
