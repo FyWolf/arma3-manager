@@ -13,7 +13,7 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 361 passing
+`use` resolves against a real panel's autoloader, and the parsers have 397 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
 
@@ -26,7 +26,7 @@ with less to show.
 |---|---|
 | Per-egg capability profiles, admin UI, egg auto-detection | built |
 | Egg coverage screen — what every egg resolves to, and why | built |
-| Mods — load order, position, add/remove, client vs server-only, live download progress | built |
+| Mods — load order, position, add/remove, client vs server-only, reinstall, live download progress | built |
 | Workshop — search, paste-a-link, dependency resolution | built |
 | Missions — list, delete, `class Missions` rotation | built |
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
@@ -125,6 +125,51 @@ Remove on a server-only row used to delete the client entry, and how the reorder
 server-only row used to do nothing at all — both silently. `PageHooksTest` fails the build if a
 row action stops passing its scope.
 
+### Reinstalling a mod
+
+**Reinstall** on a row deletes a mod's files and makes the next start fetch it again. It is for
+the case where a mod is corrupt, half-downloaded, or stuck on a version SteamCMD believes is
+current when it is not.
+
+**Deleting the files is not enough, and that is the whole point of this button.** SteamCMD keeps
+its own record of what it has in `<workshop root>/appworkshop_107410.acf`, and it trusts that
+record over the disk. An item listed there with a current manifest is "installed", so
+`workshop_download_item` reports success and transfers nothing. Delete the files by hand, leave
+the ACF, and the mod stays missing through download after download — which is exactly the state
+that gets described as SteamCMD losing track of a mod's version.
+
+So three things go:
+
+1. `@<id>` and `@<id>_optional` — the folders the server loads
+2. `<root>/content/107410/<id>`, and any half-finished `downloads/` copy
+3. **the item's entry in the ACF**
+
+The mod stays in the load order. Nothing is downloaded here; the egg fetches what is missing on
+the next start, which is when Arma would pick it up regardless.
+
+#### Why the ACF is edited rather than deleted
+
+Deleting `appworkshop_107410.acf` outright is the folk remedy and it does work, but it discards
+the record for **every** mod on the server. The next start has no idea what it already has, so a
+customer reinstalling one broken 200 MB mod gets their whole 40 GB set re-fetched — a bandwidth
+bill and hours of downtime, caused by a button labelled "reinstall this mod".
+
+`SteamAcf` therefore removes just that item's two blocks — it appears in both
+`WorkshopItemsInstalled` and `WorkshopItemDetails`, and leaving either half behind lets SteamCMD
+go on believing it.
+
+**It refuses rather than guesses.** The result is brace-checked before and after the edit, an id
+is only matched where it introduces a block (so `"manifest" "450814997"` is never mistaken for
+an entry), and braces inside quoted values — a mod title with a `{` in it — do not derail the
+cut. Anything unexpected returns null and nothing is written: a corrupt ACF is not one mod
+failing to update, it is SteamCMD unable to read its own state for every mod on the server.
+
+A refusal is **reported, not swallowed.** The notification says the files went but the record did
+not, and points at the file to delete by hand. Staying quiet there would leave a customer
+pressing Reinstall repeatedly against a mod SteamCMD had already decided it owned.
+
+`SteamAcfTest` has 36 assertions and most of them are refusals.
+
 ### Watching the download
 
 The Mods page polls every five seconds and shows each mod as **Downloaded**, **Downloading**
@@ -187,13 +232,14 @@ client for a missing addon, naming a class rather than a mod.
 
 ## Developing
 
-Eight checks, six of which need no panel at all:
+Nine checks, seven of which need no panel at all:
 
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 73 load-order assertions
 php tests/LauncherPresetTest.php                  # 106 preset/id/entry assertions
 php tests/DownloadStatusTest.php                  # 49 status.json parsing assertions
+php tests/SteamAcfTest.php                        # 36 ACF edit/refusal assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
 php tests/PageHooksTest.php                       # page conventions: headers, uploads, mod ids
@@ -448,6 +494,7 @@ permission types are introduced.
 | Change the load order, import a preset, install a mod set | `startup.update` + `file.update` |
 | Schedule or unschedule a mission | `file.update` |
 | Delete a mission | `file.delete` |
+| Reinstall a mod (delete its files and SteamCMD's record) | `file.delete` + `file.update` |
 | See startup parameters | `startup.read` |
 | Change startup parameters | `startup.update` |
 

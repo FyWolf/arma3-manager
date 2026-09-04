@@ -417,6 +417,21 @@ class ModsPage extends Page implements HasTable
                     ->visible(fn (array $record): bool => $record['url'] !== null)
                     ->url(fn (array $record): string => $record['url'], true),
 
+                Action::make('reinstall')
+                    ->label('Reinstall')
+                    ->icon('tabler-refresh')
+                    ->color('warning')
+                    ->iconButton()
+                    // Only a Workshop item has anything to re-download. A CDLC
+                    // ships with the game and a hand-uploaded folder has no
+                    // source to fetch it from again.
+                    ->visible(fn (array $record): bool => $record['id'] !== null && $this->canReinstall())
+                    ->requiresConfirmation()
+                    ->modalHeading(fn (array $record): string => 'Reinstall ' . $record['name'] . '?')
+                    ->modalDescription('Deletes this mod\'s files and clears it from SteamCMD\'s installed record, so the next server start fetches it again from scratch. Use it when a mod is corrupt or stuck on an old version — clearing the record is what makes SteamCMD actually re-download rather than deciding it already has the mod. Nothing else is touched, and the mod stays in the load order.')
+                    ->modalSubmitActionLabel('Delete and re-download')
+                    ->action(fn (array $record) => $this->reinstall($record['id'], $record['name'])),
+
                 Action::make('remove')
                     ->label('Remove')
                     ->icon('tabler-trash')
@@ -442,6 +457,19 @@ class ModsPage extends Page implements HasTable
     private function hasServerModList(): bool
     {
         return app(ModService::class)->serverModVariables($this->profile()) !== [];
+    }
+
+    /**
+     * Reinstalling deletes files and rewrites SteamCMD's record.
+     *
+     * File permissions, not `startup.update`: this changes nothing about the
+     * load order, only what is on disk. A subuser trusted to delete files is
+     * exactly the person who should be able to clear a corrupt mod.
+     */
+    private function canReinstall(): bool
+    {
+        return (user()?->can(SubuserPermission::FileDelete, $this->server()) ?? false)
+            && (user()?->can(SubuserPermission::FileUpdate, $this->server()) ?? false);
     }
 
     /**
@@ -585,6 +613,65 @@ class ModsPage extends Page implements HasTable
             report($exception);
 
             Notification::make()->title('Could not remove')->body($exception->getMessage())->danger()->send();
+        }
+    }
+
+    /**
+     * Delete a mod's files and SteamCMD's record of it, so it downloads again.
+     *
+     * The ACF outcome is reported rather than swallowed, and that is the point
+     * of the whole notification. If the record could not be cleared, SteamCMD
+     * will look at its own manifest on the next start, decide the mod is already
+     * installed, and transfer nothing — so the mod stays missing and the button
+     * will have appeared to work. A customer who is told that can go and delete
+     * the file by hand; a customer who is not told will press Reinstall three
+     * more times and open a ticket.
+     */
+    private function reinstall(string $id, string $name): void
+    {
+        if (! $this->canReinstall()) {
+            Notification::make()->title(trans('arma3-manager::strings.permission_denied'))->danger()->send();
+
+            return;
+        }
+
+        try {
+            $result = app(ModService::class)->reinstall($this->server(), $this->profile(), $id);
+
+            Activity::event('server:arma3.mod-reinstall')
+                ->property(['mod' => $id, 'removed' => $result['removed'], 'acf' => $result['acf']])
+                ->log();
+
+            if (in_array($result['acf'], ['refused', 'failed'], true)) {
+                Notification::make()
+                    ->title('Files deleted, but SteamCMD\'s record was left alone')
+                    ->body('The files for ' . $name . ' are gone, but its entry in appworkshop_' . (int) config('arma3-manager.workshop.app_id', 107410) . '.acf could not be edited safely, so SteamCMD may still think it has this mod and skip the download. Delete that file in the file manager to force a full re-check of every mod.')
+                    ->warning()
+                    ->persistent()
+                    ->send();
+
+                return;
+            }
+
+            if ($result['removed'] === [] && $result['acf'] !== 'updated') {
+                Notification::make()
+                    ->title('Nothing to delete')
+                    ->body($name . ' has no files on this server, so it will be downloaded on the next start anyway.')
+                    ->warning()
+                    ->send();
+
+                return;
+            }
+
+            Notification::make()
+                ->title('Ready to re-download')
+                ->body(count($result['removed']) . ' item(s) deleted' . ($result['acf'] === 'updated' ? ', and SteamCMD\'s record cleared' : '') . '. ' . $name . ' is fetched again the next time the server starts.')
+                ->success()
+                ->send();
+        } catch (Throwable $exception) {
+            report($exception);
+
+            Notification::make()->title('Could not reinstall')->body($exception->getMessage())->danger()->send();
         }
     }
 

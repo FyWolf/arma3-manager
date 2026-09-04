@@ -10,6 +10,7 @@ use FyWolf\Arma3Manager\Support\DownloadStatus;
 use FyWolf\Arma3Manager\Support\ModList;
 use FyWolf\Arma3Manager\Support\ResolvedProfile;
 use FyWolf\Arma3Manager\Support\ServerVariables;
+use FyWolf\Arma3Manager\Support\SteamAcf;
 use FyWolf\Arma3Manager\Support\WorkshopId;
 use RuntimeException;
 use Throwable;
@@ -620,6 +621,156 @@ class ModService
             DaemonDirs::join($profile->modsDir()),
             [$name],
         );
+    }
+
+    /**
+     * Force one Workshop mod to be fetched from scratch on the next start.
+     *
+     * ## Deleting the files is not enough
+     *
+     * SteamCMD keeps its own record of what it has in
+     * `<root>/appworkshop_<app>.acf`, and it trusts that record over the disk.
+     * An item listed there with a current manifest is "installed", so
+     * `workshop_download_item` reports success and transfers nothing. Delete the
+     * files and leave the ACF, and the mod stays missing through download after
+     * download — which is precisely the state that gets described as SteamCMD
+     * losing track of a mod's version.
+     *
+     * So this removes three things, and the third is the one that makes it work:
+     *
+     *   1. `@<id>` (and `@<id>_optional`) — what the server loads
+     *   2. `<root>/content/<app>/<id>` and any half-finished `downloads/` copy
+     *   3. the item's entry in the ACF
+     *
+     * The ACF is edited surgically rather than deleted. Deleting it is the folk
+     * remedy and it does work, but it discards the record for every mod on the
+     * server — so a customer reinstalling one broken 200 MB mod would re-fetch
+     * their entire 40 GB set. `SteamAcf` refuses rather than write anything it
+     * is unsure of, and a refusal is reported rather than swallowed: the mod
+     * will not come back on its own, and saying so is the difference between a
+     * fix and a button that looks like it worked.
+     *
+     * Nothing is downloaded here. The egg fetches what is missing on the next
+     * start, which is also when Arma would pick it up regardless.
+     *
+     * @return array{removed: array<int, string>, acf: string} what was deleted,
+     *                                                         and how the ACF went
+     */
+    public function reinstall(Server $server, ResolvedProfile $profile, string $id): array
+    {
+        if (! WorkshopId::isValid($id)) {
+            throw new RuntimeException('Refusing to reinstall "' . $id . '" — that is not a Workshop id.');
+        }
+
+        $appId = (int) config('arma3-manager.workshop.app_id', 107410);
+        $removed = [];
+
+        // The loaded folder can be in any of the three places a mod folder is
+        // looked for, and `_optional` is the name the egg uses for a mod that is
+        // offered to clients but not required.
+        foreach (array_unique(array_filter(['/', $profile->modsDir(), $profile->serverModsDir()])) as $directory) {
+            foreach (['@' . $id, '@' . $id . '_optional'] as $folder) {
+                if ($this->deleteQuietly($server, $directory, $folder)) {
+                    $removed[] = trim($directory, '/') === '' ? $folder : trim($directory, '/') . '/' . $folder;
+                }
+            }
+        }
+
+        // The SteamCMD cache. Null means no root answered — nothing has been
+        // downloaded, or the daemon is refusing listings — so fall back to the
+        // configured candidates: deleting a path that does not exist is free,
+        // and skipping it would leave a stale cache behind.
+        $roots = $this->resolvedWorkshopRoot($server) !== null
+            ? [$this->resolvedWorkshopRoot($server)]
+            : (array) config('arma3-manager.steamcmd.workshop_roots', []);
+
+        foreach ($roots as $root) {
+            $root = trim((string) $root, '/');
+
+            if ($root === '') {
+                continue;
+            }
+
+            foreach (['content', 'downloads'] as $bucket) {
+                if ($this->deleteQuietly($server, $root . '/' . $bucket . '/' . $appId, $id)) {
+                    $removed[] = $root . '/' . $bucket . '/' . $appId . '/' . $id;
+                }
+            }
+        }
+
+        return ['removed' => $removed, 'acf' => $this->forgetInAcf($server, $roots, $appId, $id)];
+    }
+
+    /**
+     * Take one item out of SteamCMD's installed record.
+     *
+     * @param  array<int, string|null>  $roots
+     * @return string one of `updated`, `absent`, `missing`, `refused`, `failed`
+     */
+    private function forgetInAcf(Server $server, array $roots, int $appId, string $id): string
+    {
+        $outcome = 'missing';
+
+        foreach ($roots as $root) {
+            $root = trim((string) $root, '/');
+
+            if ($root === '') {
+                continue;
+            }
+
+            $path = $root . '/appworkshop_' . $appId . '.acf';
+
+            try {
+                $acf = $this->repository->setServer($server)->getContent(DaemonDirs::join($path), 8 * 1024 * 1024);
+            } catch (Throwable) {
+                // No such file under this root. Try the next one.
+                continue;
+            }
+
+            if (! SteamAcf::hasItem($acf, $id)) {
+                $outcome = 'absent';
+
+                continue;
+            }
+
+            $rewritten = SteamAcf::withoutItem($acf, $id);
+
+            if ($rewritten === null || $rewritten === $acf) {
+                // Refused. Never write a file this could not fully understand —
+                // a corrupted ACF is not one mod failing to update, it is
+                // SteamCMD unable to read its own state for every mod.
+                return 'refused';
+            }
+
+            try {
+                $this->repository->setServer($server)->putContent($path, $rewritten);
+            } catch (Throwable $exception) {
+                report($exception);
+
+                return 'failed';
+            }
+
+            $outcome = 'updated';
+        }
+
+        return $outcome;
+    }
+
+    /**
+     * Delete one entry, reporting whether it was there rather than throwing.
+     *
+     * Wings answers a delete of something absent with an error, and every caller
+     * here is deleting a set of paths of which only some exist.
+     */
+    private function deleteQuietly(Server $server, string $directory, string $name): bool
+    {
+        try {
+            $this->repository->setServer($server)->deleteFiles(DaemonDirs::join($directory), [$name]);
+
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     /**
