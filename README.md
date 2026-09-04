@@ -13,9 +13,14 @@ mapped shows nothing rather than a broken page.
 ## Status
 
 Feature-complete and **not yet tested against a live panel.** Every page is written, every
-`use` resolves against a real panel's autoloader, and the parsers have 307 passing
+`use` resolves against a real panel's autoloader, and the parsers have 360 passing
 assertions — but nothing here has been exercised against a running Wings daemon or a real
 Arma 3 egg. Treat the first install as a shakedown, on a server you do not mind breaking.
+
+The download reporting has a companion egg,
+[`arma3-manager-egg`](https://github.com/FyWolf/arma3-manager-egg), which makes per-mod
+percentages and failure reasons possible. It is optional; everything works on the stock egg
+with less to show.
 
 | Feature | State |
 |---|---|
@@ -82,7 +87,7 @@ fails the build if anything starts synthesising a folder name from a title again
 Two things follow. Mod names on screen are resolved from the Steam API and cached, so the
 tables show "ACE3" rather than a column of numbers, degrading to the id if Steam is
 unreachable. And "is it downloaded?" is now exact rather than a name match: SteamCMD writes
-into `steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
+into `Steam/steamapps/workshop/content/107410/<id>`, a path derivable from the id alone.
 
 ### Watching the download
 
@@ -90,17 +95,50 @@ The Mods page polls every five seconds and shows each mod as **Downloaded**, **D
 or **Waiting**, with a running count above the table.
 
 Those three states are real rather than inferred. SteamCMD stages an item in
-`steamapps/workshop/downloads/<app>/<id>` while it transfers and **moves** it into
+`<workshop root>/downloads/<app>/<id>` while it transfers and **moves** it into
 `content/<app>/<id>` when it completes, so two directory listings answer the question exactly.
 Both are memoised per request, so a ninety-mod list costs two listings a tick, not two per row.
 
-What it cannot show is a percentage *within* one mod: SteamCMD's transfer output never reaches
-the panel. A 10 GB mod therefore sits on "Downloading" for a long time and then completes.
-That is said on the row's tooltip rather than papered over with a bar that moves smoothly and
-means nothing.
+**The root is `Steam/steamapps/workshop`, not `steamapps/workshop`.** `workshop_download_item`
+runs without `+force_install_dir`, so SteamCMD falls back to `$HOME/Steam`; only the game is
+installed to the server root. This plugin assumed the shorter path for its whole life, the
+listing 404'd, `listDirectories()` swallowed it, and so **every mod read "Waiting" forever**
+while the downloads worked perfectly. `ModService::workshopRoot()` now probes for it and
+`PageHooksTest` fails the build on a bare literal.
+
+### What the two eggs can tell you
+
+On the **stock Arma 3 egg** there is no percentage within one mod: SteamCMD's transfer output
+never reaches the panel. A 10 GB mod sits on "Downloading" for a long time and then completes,
+which the tooltip says rather than papering over it with a bar that moves smoothly and means
+nothing. Worse, a **failed** mod is invisible — SteamCMD reports the failure to the console,
+which scrolls away, and on disk a mod that gave up after three attempts is identical to one not
+yet reached. Both read as "Waiting".
+
+On the [**arma3-manager egg**](https://github.com/FyWolf/arma3-manager-egg) the container
+writes `.arma3-manager/status.json` and the page reads it: a real percentage per mod, the name
+the egg resolved, and — the one a directory listing can never give — the reason a download
+failed, on the row that failed. The percentage is the size on disk against the size Steam
+reported, so it steps rather than glides.
+
+`DownloadStatus` handles the file, and every accessor answers "I don't know" rather than
+throwing, because the stock egg writes nothing. A `mods` phase that has stopped being rewritten
+is treated as stale and the listings win again — otherwise a container killed mid-download would
+claim a mod was downloading forever, which looks exactly like a slow mod.
+
+The panel supplies the other half: `writeWanted()` publishes each mod's name and expected size
+to `.arma3-manager/wanted.json` on every save, because the sizes live behind the Steam Web API
+and the container has no credentials but the customer's own. Without that file the egg still
+reports state; there is simply no percentage.
 
 The panel does not start the download — it has no Steam credentials, by design. The egg fetches
 what is listed the next time the server **starts**; nothing here needs a reinstall.
+
+On the arma3-manager egg, `A3M_SYNC_ONLY=1` makes a start download everything and then exit
+without launching the game, so a large set can be fetched ahead of a session. That is as close
+to "download now" as is possible or useful: Arma reads its mod list once, at startup, so mods
+fetched under a running server would not load until the next restart anyway. The only thing ever
+in question is when the restart happens.
 
 Creator DLC **are** in that list — the field is documented as "useful for loading CDLCs" and its
 own example includes `vn`. They are loaded but never downloaded, so the Mods page shows them as
@@ -113,12 +151,13 @@ client for a missing addon, naming a class rather than a mod.
 
 ## Developing
 
-Seven checks, five of which need no panel at all:
+Eight checks, six of which need no panel at all:
 
 ```
 php tests/ArmaConfigFileTest.php                  # 63 round-trip assertions
 php tests/ModListTest.php                         # 73 load-order assertions
-php tests/LauncherPresetTest.php                  # 104 preset/id/entry assertions
+php tests/LauncherPresetTest.php                  # 106 preset/id/entry assertions
+php tests/DownloadStatusTest.php                  # 49 status.json parsing assertions
 php tests/MissionRotationTest.php                 # 30 rotation assertions
 php tests/StartupParametersTest.php               # 33 command-line assertions
 php tests/PageHooksTest.php                       # page conventions: headers, uploads, mod ids

@@ -227,7 +227,12 @@ class ModsPage extends Page implements HasTable
                 $records = [];
                 $position = 1;
 
-                $build = function (string $entry, string $scope, int $position) use ($downloaded, $downloading, $titles): array {
+                // The egg's own account of the download, when its egg writes one.
+                // Null on the stock Arma 3 egg, and every use of it below is
+                // written to degrade to what the directory listings said.
+                $status = $mods->status($server);
+
+                $build = function (string $entry, string $scope, int $position) use ($downloaded, $downloading, $titles, $status): array {
                     // The list is deliberately mixed — `myMod;vn;@123456789;` —
                     // so an entry is a Workshop item only when it is `@` plus
                     // digits. A CDLC code or a hand-uploaded folder has no
@@ -235,18 +240,33 @@ class ModsPage extends Page implements HasTable
                     // forever, because nothing will ever fetch it.
                     $id = WorkshopId::fromModEntry($entry);
 
+                    // `failed` is checked first and comes only from the egg. It
+                    // is the state a directory listing can never produce: a mod
+                    // SteamCMD gave up on leaves nothing behind, so on disk it is
+                    // identical to one that has not been reached yet. Ranking it
+                    // below "waiting" would bury the only row worth acting on.
                     $state = match (true) {
                         $id === null => 'local',
+                        $id !== null && $status?->state($id) === 'failed' => 'failed',
                         in_array($id, $downloaded, true) => 'downloaded',
                         in_array($id, $downloading, true) => 'downloading',
                         default => 'waiting',
                     };
 
+                    $percent = $id !== null && $state === 'downloading' ? $status?->percent($id) : null;
+
                     return [
                         'entry' => $entry,
                         'position' => $position,
-                        'name' => $id !== null ? ($titles[$id]->title ?? $entry) : $entry,
+                        // Steam first, then the name the egg scraped while
+                        // downloading, then the raw entry. The middle one is what
+                        // keeps the table readable during a Steam outage.
+                        'name' => $id !== null
+                            ? ($titles[$id]->title ?? $status?->name($id) ?? $entry)
+                            : $entry,
                         'id' => $id,
+                        'percent' => $percent,
+                        'error' => $id !== null ? $status?->error($id) : null,
                         // The egg's field refuses capitals, spaces and folders
                         // starting with a number. Anything this plugin writes
                         // complies, but a hand-edited entry might not, and the
@@ -259,19 +279,26 @@ class ModsPage extends Page implements HasTable
                         'present' => $state === 'downloaded',
                         'status' => match ($state) {
                             'downloaded' => 'Downloaded',
-                            'downloading' => 'Downloading',
+                            // The percentage is only ever shown when the egg
+                            // measured one. "Downloading" with no number is the
+                            // honest display on the stock egg, and better than a
+                            // 0% that reads as "started and got nowhere".
+                            'downloading' => $percent !== null ? 'Downloading ' . $percent . '%' : 'Downloading',
+                            'failed' => 'Failed',
                             'local' => 'Not from the Workshop',
                             default => 'Waiting',
                         },
                         'status_color' => match ($state) {
                             'downloaded' => 'success',
                             'downloading' => 'info',
+                            'failed' => 'danger',
                             'local' => 'warning',
                             default => 'gray',
                         },
                         'status_icon' => match ($state) {
                             'downloaded' => 'tabler-circle-check',
                             'downloading' => 'tabler-progress',
+                            'failed' => 'tabler-alert-circle',
                             'local' => 'tabler-folder',
                             default => 'tabler-clock',
                         },
@@ -309,9 +336,15 @@ class ModsPage extends Page implements HasTable
                     ->badge()
                     ->icon(fn (array $record): string => $record['status_icon'])
                     ->color(fn (array $record): string => $record['status_color'])
-                    ->tooltip(fn (array $record): string => match ($record['state']) {
+                    // A failure's reason comes from the egg and is the most
+                    // useful string on the page, so it wins over the generic
+                    // explanation for its state.
+                    ->tooltip(fn (array $record): string => $record['error'] ?? match ($record['state']) {
                         'downloaded' => 'On disk — either in the SteamCMD cache under Steam/steamapps/workshop/content, or as the @<id> folder the server loads.',
-                        'downloading' => 'SteamCMD is transferring this now. There is no percentage available — its output does not reach the panel — so a large mod sits here for a while and then completes.',
+                        'downloading' => $record['percent'] !== null
+                            ? 'SteamCMD is transferring this now. The percentage is the size on disk against the size Steam reported, so it moves in steps rather than smoothly.'
+                            : 'SteamCMD is transferring this now. No percentage is available on this egg, so a large mod sits here for a while and then completes.',
+                        'failed' => 'SteamCMD gave up on this mod. Starting the server again retries it.',
                         'local' => 'Not an @workshopID entry, so nothing downloads it. A Creator DLC ships with the game; a plain folder name has to be uploaded yourself.',
                         default => 'Queued. SteamCMD fetches items one at a time, in order.',
                     }),
