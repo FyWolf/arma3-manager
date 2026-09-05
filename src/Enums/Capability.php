@@ -25,7 +25,6 @@ enum Capability: string implements HasLabel
     case Configs = 'configs';
     case Presets = 'presets';
     case Parameters = 'parameters';
-    case ModSets = 'modsets';
 
     public function getLabel(): string
     {
@@ -36,7 +35,6 @@ enum Capability: string implements HasLabel
             self::Configs => 'Configuration files',
             self::Presets => 'Launcher presets',
             self::Parameters => 'Startup parameters',
-            self::ModSets => 'Mod sets',
         };
     }
 
@@ -49,7 +47,6 @@ enum Capability: string implements HasLabel
             self::Configs => 'Edit server.cfg and basic.cfg as a form.',
             self::Presets => 'Import and export Arma 3 Launcher HTML presets.',
             self::Parameters => 'Startup flags, headless clients and Creator DLC.',
-            self::ModSets => 'Install a whole curated mod set in one action.',
         };
     }
 

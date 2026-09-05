@@ -3,8 +3,8 @@
 Workshop mods, load order, missions, launcher presets and server configuration for Arma 3
 servers on Pelican Panel — with every feature gated by the server's egg.
 
-A dedicated server gets mods, the Workshop browser, missions, configuration, presets,
-parameters and mod sets. A headless client gets mods, presets and parameters, and **no**
+A dedicated server gets mods, the Workshop browser, missions, configuration, presets and
+parameters. A headless client gets mods, presets and parameters, and **no**
 Missions or Configuration page — it joins a mission, it does not host one. An egg nobody has
 mapped shows nothing rather than a broken page.
 
@@ -32,7 +32,6 @@ optional; everything works on the stock egg with less to show and no background 
 | Configuration — typed `server.cfg` / `basic.cfg` editor, locked keys | built |
 | Presets — saved per server, switchable, HTML upload and export | built |
 | Parameters — startup flags, headless clients, Creator DLC | built |
-| Mod sets — curated catalogue, queued install, billing grants | built |
 
 ## The thing to understand first: this panel holds no Steam credentials
 
@@ -245,40 +244,19 @@ server that is otherwise running perfectly.
 
 #### When the server is stopped
 
-The daemon only exists while the server does, so there is no container to ask. **Download now**
-still works: it triggers Wings' `reinstall`, which is the one API that starts a container against
-a stopped server's volume. Wings' own comment on that function is the guarantee it rests on —
-*"This does not touch any existing files for the server, other than what the script modifies."*
+The daemon only exists while the server does, so a request simply waits and the next start
+fetches it — which is what the stock egg does anyway.
 
-The egg's install script carries a mods-only fast path, so what actually runs is a mod download,
-not a reinstall. The game files are not touched and nothing is re-validated. The only visible
-difference is that the server shows as **Installing** while it happens.
+**Mods are only ever downloaded by the server's own container**, at boot or by the daemon. That
+is a deliberate narrowing. Two other routes were built and removed: an `A3M_SYNC_ONLY` variable
+that made the container download and exit instead of launching, and a path that used Wings'
+`reinstall` to run a mods-only install script in a throwaway container on the stopped server's
+volume. Both worked. The first is a server that never comes back up if anyone forgets to unset
+the variable; the second takes the server to **Installing** and puts a download behind an API
+whose whole job is reinstalling things. Neither is worth the surface for "the mods arrive a few
+minutes sooner".
 
-`canSyncWhileStopped()` detects this by looking for the fast path's marker in the egg's own
-`script_install`, because that is the thing that decides the outcome. A capability flag would be
-a second place for the truth to live, and the failure would be a twenty-gigabyte game
-re-validation on a server whose owner asked for one mod.
-
-Three things make it decline, and all three are normal rather than errors — the request is
-already written, so the mods still arrive at the next start:
-
-- the server is **running** (the daemon has it already),
-- the egg has **no fast path** (a stock egg would do a full reinstall),
-- the subuser lacks **`settings.reinstall`** — this starts a container and takes the server to
-  Installing, which someone trusted to edit a mod list is not automatically trusted with.
-
-It also refuses unless the server is genuinely `Offline`. Wings would otherwise **stop a running
-server** to do it, turning "download in the background" into an unannounced shutdown — the exact
-opposite of the feature.
-
-The panel does not download anything itself — it has no Steam credentials, by design. On the
-stock egg the fetch happens the next time the server **starts**.
-
-On the arma3-manager egg, `A3M_SYNC_ONLY=1` makes a start download everything and then exit
-without launching the game, so a large set can be fetched ahead of a session. That is as close
-to "download now" as is possible or useful: Arma reads its mod list once, at startup, so mods
-fetched under a running server would not load until the next restart anyway. The only thing ever
-in question is when the restart happens.
+The panel does not download anything itself — it has no Steam credentials, by design.
 
 Creator DLC **are** in that list — the field is documented as "useful for loading CDLCs" and its
 own example includes `vn`. They are loaded but never downloaded, so the Mods page shows them as
@@ -495,9 +473,9 @@ refuses rather than creating a missing variable, and names the one it was lookin
 
 1. Install the plugin from the panel (Admin → Plugins) or drop this folder into
    `plugins/arma3-manager` and run the installer.
-2. Migrations create `a3_capability_profiles`, `egg_a3_capability_profile`, `a3_mod_sets`,
-   `a3_mod_set_installs` and `a3_server_mod_sets`. The seeder creates the two built-in
-   profiles and maps any Arma eggs that already exist.
+2. Migrations create `a3_capability_profiles`, `egg_a3_capability_profile` and `a3_presets`,
+   and drop the three `a3_mod_set*` tables if an older version left them behind. The seeder
+   creates the two built-in profiles and maps any Arma eggs that already exist.
 3. **After importing new eggs**, run `php artisan arma3-manager:sync-profiles` — eggs are
    imported from the `pelican-eggs` organisation *after* the panel is set up, so eggs added
    later are not mapped by the install-time seeder. Admin → Arma 3 Profiles has the same thing
@@ -519,26 +497,6 @@ it into **Admin → Plugins → Arma 3 Manager → Settings**, then press **Test
 
 This is **not** a Steam login. No Steam password is ever stored in the panel.
 
-### Optional but recommended: a mod set queue
-
-Resolving a large set is minutes of round trips to Steam. On the default queue that blocks
-every other panel job — backups, webhooks, SFTP revocation. Set a dedicated queue name in the
-plugin settings and run a worker for it:
-
-```
-php artisan queue:work --queue=a3m-sets
-```
-
-The stale-install reaper is scheduled hourly by the plugin and needs nothing from you, but can
-be run by hand:
-
-```
-php artisan arma3-manager:prune-installs
-```
-
-Without it, one `queue:restart` during a deploy permanently locks a server out of further
-installs: the abandoned row stays non-terminal and the one-install-per-server guard refuses
-everything afterwards.
 
 ## Permissions
 
@@ -550,12 +508,11 @@ permission types are introduced.
 | See mods, browse the Workshop, list missions | `file.read` |
 | Read configuration | `file.read-content` |
 | Edit configuration | `file.read-content` + `file.update` |
-| Change the load order, import a preset, install a mod set | `startup.update` + `file.update` |
+| Change the load order, import a preset | `startup.update` + `file.update` |
 | Schedule or unschedule a mission | `file.update` |
 | Delete a mission | `file.delete` |
 | Reinstall a mod (delete its files and SteamCMD's record) | `file.delete` + `file.update` |
 | Ask for a background download | `startup.update` + `file.update` |
-| Have that run while the server is stopped | also `settings.reinstall` |
 | See startup parameters | `startup.read` |
 | Change startup parameters | `startup.update` |
 
@@ -585,9 +542,9 @@ Configure the list at **Admin → Plugins → Arma 3 Manager → Settings**.
 
 ## Uninstalling
 
-Uninstalling a plugin rolls back its migrations, so **the egg-to-profile mapping and the mod
-set catalogue are dropped**. Export the mapping first from Admin → Arma 3 Profiles if you
-intend to reinstall.
+Uninstalling a plugin rolls back its migrations, so **the egg-to-profile mapping and every
+saved preset are dropped**. Export the mapping first from Admin → Arma 3 Profiles, and any
+preset you want to keep from the Presets page, if you intend to reinstall.
 
 Mods, missions and configuration files live on the game server and are untouched.
 

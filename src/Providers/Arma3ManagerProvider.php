@@ -6,16 +6,12 @@ use App\Models\ApiKey;
 use App\Models\Egg;
 use App\Models\Role;
 use FyWolf\Arma3Manager\Console\Commands\DiagnoseServerCommand;
-use FyWolf\Arma3Manager\Console\Commands\PruneStaleInstallsCommand;
 use FyWolf\Arma3Manager\Console\Commands\SyncProfilesCommand;
-use FyWolf\Arma3Manager\Http\Controllers\Api\ModSetController;
 use FyWolf\Arma3Manager\Integrations\Workshop\SteamWorkshopClient;
 use FyWolf\Arma3Manager\Models\CapabilityProfile;
 use FyWolf\Arma3Manager\Models\EggCapabilityProfile;
 use FyWolf\Arma3Manager\Support\CapabilityResolver;
 use Illuminate\Support\Facades\Lang;
-use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Facades\Schedule;
 use Illuminate\Support\ServiceProvider;
 
 /**
@@ -50,9 +46,6 @@ class Arma3ManagerProvider extends ServiceProvider
         Role::registerCustomDefaultPermissions('a3_capability_profile');
         Role::registerCustomModelIcon('a3_capability_profile', 'tabler-target-arrow');
 
-        Role::registerCustomDefaultPermissions('a3_mod_set');
-        Role::registerCustomModelIcon('a3_mod_set', 'tabler-packages');
-
         // Singleton so the per-egg memo survives across the several components
         // that each ask "what can this server do?" while rendering one page.
         $this->app->singleton(CapabilityResolver::class);
@@ -67,8 +60,6 @@ class Arma3ManagerProvider extends ServiceProvider
     {
         $this->registerEggRelation();
         $this->registerActivityStrings();
-        $this->registerSchedule();
-        $this->registerRoutes();
         $this->registerCommands();
     }
 
@@ -77,45 +68,16 @@ class Arma3ManagerProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 SyncProfilesCommand::class,
-                PruneStaleInstallsCommand::class,
                 DiagnoseServerCommand::class,
             ]);
         }
     }
 
-    /**
-     * The endpoints the billing service calls.
-     *
-     * The withoutMiddleware() list is mandatory boilerplate for a panel API
-     * route: without it the global `web` group and CSRF verification apply, and
-     * token authentication simply does not work.
-     */
-    private function registerRoutes(): void
-    {
-        Route::prefix('api/application/arma3')
-            ->middleware(['auth:sanctum', 'throttle:120,1'])
-            ->withoutMiddleware(['web', 'auth', 'verify-csrf-token', 'App\Http\Middleware\VerifyCsrfToken'])
-            ->group(function () {
-                Route::get('/mod-sets', [ModSetController::class, 'catalogue'])->name('arma3-manager.api.catalogue');
-                Route::post('/mod-sets', [ModSetController::class, 'store'])->name('arma3-manager.api.grant');
-                Route::delete('/mod-sets', [ModSetController::class, 'destroy'])->name('arma3-manager.api.revoke');
-                Route::get('/servers/{server}/mod-sets', [ModSetController::class, 'index'])->name('arma3-manager.api.list');
-            });
-    }
-
-    /**
-     * Without this, one `queue:restart` during a deploy permanently locks a
-     * server out of mod set installs: the abandoned row stays non-terminal and
-     * the one-install-per-server guard refuses everything afterwards.
-     */
-    private function registerSchedule(): void
-    {
-        $this->app->booted(function () {
-            Schedule::command(PruneStaleInstallsCommand::class)
-                ->hourly()
-                ->withoutOverlapping();
-        });
-    }
+    // There are deliberately no routes and no scheduled tasks. Both existed only
+    // for mod sets — an API for a billing service to grant a curated set, and an
+    // hourly reaper for installs abandoned by a `queue:restart`. The feature was
+    // never used and is gone, and an endpoint or a cron entry left behind for it
+    // is a surface to keep working for nobody.
 
     /**
      * Graft the profile relation onto the panel's own Egg model.

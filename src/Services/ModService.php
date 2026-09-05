@@ -638,37 +638,6 @@ class ModService
     }
 
     /**
-     * Whether this egg can download mods while the server is **stopped**.
-     *
-     * ## Why this is possible at all
-     *
-     * Wings exposes exactly one API that starts a container against a stopped
-     * server's volume: `reinstall`. It waits for the server to go offline,
-     * mounts the volume at `/mnt/server`, and runs the egg's install script.
-     * Wings' own comment on the function is the guarantee this leans on —
-     * *"This does not touch any existing files for the server, other than what
-     * the script modifies."*
-     *
-     * So a reinstall whose script only fetches mods **is** a throwaway container
-     * on the same volume, which is what downloading while the server is down
-     * requires. There is no generic "run this container" endpoint; this is the
-     * whole mechanism.
-     *
-     * Detected by looking for the fast path's marker in the egg's own install
-     * script, because that is the thing that decides the outcome. A capability
-     * flag or a variable would be a second place for the truth to live, and the
-     * failure would be a full twenty-gigabyte game re-validation on a server
-     * whose owner asked for one mod.
-     */
-    public function canSyncWhileStopped(Server $server): bool
-    {
-        return str_contains(
-            (string) ($server->egg?->script_install ?? ''),
-            'A3M === MODS-ONLY FAST PATH',
-        );
-    }
-
-    /**
      * Ask the running container to download mods now, without a restart.
      *
      * Writes `.arma3-manager/request.json`, which the egg's sync daemon picks up

@@ -174,21 +174,6 @@ class Arma3ManagerPlugin implements HasPluginSettings, Plugin
                         ->placeholder('Set by your plan — contact support to change it.')
                         ->default(fn () => config('arma3-manager.configs.locked_reason')),
                 ]),
-
-            Section::make('Mod sets')
-                ->description('Curated mod set installs run on a queue worker.')
-                ->schema([
-                    TextInput::make('modsets_queue')
-                        ->label('Queue name')
-                        ->placeholder('default')
-                        ->helperText('Resolving a large set is minutes of Steam round trips. On the default queue that blocks every other panel job — backups, webhooks. Give it a dedicated name and run `php artisan queue:work --queue=<name>`.')
-                        ->default(fn () => config('arma3-manager.modsets.queue', 'default')),
-
-                    Toggle::make('reinstall_on_sync')
-                        ->label('Allow a mod change to trigger a reinstall')
-                        ->helperText('Off by default. A reinstall is destructive on some eggs, and an operator should opt in rather than discover it. With this off, customers are told to reinstall themselves after changing mods.')
-                        ->default(fn () => (bool) config('arma3-manager.steamcmd.reinstall_on_sync', false)),
-                ]),
         ];
     }
 
@@ -215,8 +200,6 @@ class Arma3ManagerPlugin implements HasPluginSettings, Plugin
             'steam_api_key' => null,
             'steam_clear_key' => false,
             'heuristics_enabled' => (bool) config('arma3-manager.heuristics.enabled', true),
-            'modsets_queue' => config('arma3-manager.modsets.queue', 'default'),
-            'reinstall_on_sync' => (bool) config('arma3-manager.steamcmd.reinstall_on_sync', false),
             'locked_properties' => (array) config('arma3-manager.configs.locked_properties', []),
             'locked_reason' => config('arma3-manager.configs.locked_reason'),
         ];
@@ -238,8 +221,6 @@ class Arma3ManagerPlugin implements HasPluginSettings, Plugin
 
         $env = [
             'A3M_HEURISTICS' => ! empty($data['heuristics_enabled']) ? 'true' : 'false',
-            'A3M_MODSETS_QUEUE' => trim((string) ($data['modsets_queue'] ?? '')) ?: 'default',
-            'A3M_REINSTALL_ON_SYNC' => ! empty($data['reinstall_on_sync']) ? 'true' : 'false',
             'A3M_LOCKED_PROPERTIES' => $locked,
             'A3M_LOCKED_REASON' => trim((string) ($data['locked_reason'] ?? '')) ?: 'Set by your plan — contact support to change it.',
         ];
