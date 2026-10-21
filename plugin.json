@@ -13,7 +13,8 @@
     "admin",
     "server"
   ],
-  "panel_version": "^1.0",
+  "panel_version": "^1.0.0-rc.1",
+  "api_version": 1,
   "composer_packages": null,
   "meta": {
     "status": "enabled",
